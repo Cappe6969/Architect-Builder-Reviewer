@@ -23,8 +23,8 @@
 
 'use strict';
 
-// Fallback API key for graphify — no need to set env vars manually
-process.env.DEEPSEEK_API_KEY ||= 'YOUR_DEEPSEEK_API_KEY';
+// Set DEEPSEEK_API_KEY in your environment before running (required for graphify).
+// Never hardcode a key here — this file is public.
 
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');

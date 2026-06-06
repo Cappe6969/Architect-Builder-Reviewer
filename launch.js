@@ -14,7 +14,8 @@ const path = require('node:path');
 const os   = require('node:os');
 
 const DIR = __dirname;
-const KEY = process.env.DEEPSEEK_API_KEY || 'YOUR_DEEPSEEK_API_KEY';
+const KEY = process.env.DEEPSEEK_API_KEY || '';
+if (!KEY) { console.error('Set DEEPSEEK_API_KEY in your environment before running launch.js'); process.exit(1); }
 
 
 // ---------------------------------------------------------------------------
