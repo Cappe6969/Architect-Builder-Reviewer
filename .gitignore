@@ -1,0 +1,15 @@
+# ship.js concurrency lock (ADR-0007)
+.ship.lock
+
+# Orchestrator artifacts (generated per-run)
+ESCALATION.md
+graph.json
+graph.html
+GRAPH_REPORT.md
+graphify-out/
+
+# Node
+node_modules/
+
+# IDE
+.vscode/

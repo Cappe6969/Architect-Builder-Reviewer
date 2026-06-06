@@ -1,0 +1,16 @@
+{
+  "name": "architect-builder-reviewer",
+  "version": "1.0.0",
+  "description": "Automated Architect / Carpenter / Reviewer swarm loop for Claude Code — write a SPEC.md, run /ship, get a clean branch.",
+  "bin": {
+    "ship": "./ship.js"
+  },
+  "scripts": {
+    "init":     "node ship-init.js",
+    "simulate": "node simulate.js",
+    "calibrate":"node calibrate.js"
+  },
+  "engines": {
+    "node": ">=18.18"
+  }
+}
