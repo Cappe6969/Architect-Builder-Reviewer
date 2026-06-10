@@ -47,6 +47,7 @@ const { defensiveJsonParse, extractUsageTokens, extractBody } = require('./lib/p
 const ROOT = process.cwd();
 const FRESH = process.argv.includes('--fresh'); // ADR-0005: opt into discarding an existing swarm branch
 const LOCK_PATH = path.join(process.cwd(), '.ship.lock'); // ADR-0007: single-run mutual exclusion
+const STATUS_PATH = path.join(process.cwd(), '.ship-status.json'); // live phase heartbeat for ship-watch.ps1 / notifiers
 
 const CONFIG = {
   specPath:      path.join(ROOT, 'SPEC.md'),
@@ -85,6 +86,18 @@ const log  = (...a) => console.log('[ship]', ...a);
 const warn = (...a) => console.warn('\x1b[33m[ship][WARN]\x1b[0m', ...a);
 const fail = (msg) => { console.error('[ship][FATAL]', msg); process.exit(1); };
 const bell = () => process.stdout.write('\x07'); // ADR-0003: native terminal bell, no external deps
+
+// Live phase heartbeat (best-effort; cosmetic; never blocks the loop). ship-watch.ps1
+// and any external notifier read this to render progress + toast on terminal states.
+// Carries branch/round forward so each call only needs to set what changed.
+let _status = {};
+function setStatus(phase, extra = {}) {
+  _status = { ..._status, ...extra };
+  try {
+    fs.writeFileSync(STATUS_PATH,
+      JSON.stringify({ phase, ..._status, pid: process.pid, ts: new Date().toISOString() }) + '\n');
+  } catch { /* heartbeat is cosmetic — ignore write failures */ }
+}
 
 function slugify(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'task';
@@ -457,6 +470,7 @@ function ensureFccServer() {
 // ---------------------------------------------------------------------------
 function preflight() {
   log('preflight: starting fail-fast checks');
+  setStatus('preflight');
   acquireLock(); // ADR-0007: refuse a concurrent run; reclaim a stale lock from a dead PID
 
   // 0. Git sanity — the loop diffs/commits against HEAD, so we need a repo with
@@ -653,6 +667,7 @@ function printMergeSummary(state) {
 }
 
 function writeEscalation(state, highFindings, reviewerResult) {
+  setStatus('escalation', { branch: state.branch });
   const payload = {
     reason: 'circuit_breaker_tripped',
     spec_path: 'SPEC.md',
@@ -680,6 +695,7 @@ function writeEscalation(state, highFindings, reviewerResult) {
 // ---------------------------------------------------------------------------
 async function runCarpenterSwarm(payload) {
   // Worker builds (initial) or fixes the Reviewer's High findings (outer retry).
+  setStatus('worker-building', { round: payload.attempt });
   await runRole('carpenter', payload);
 
   let masterNotes = '';
@@ -691,6 +707,7 @@ async function runCarpenterSwarm(payload) {
       break;
     }
 
+    setStatus('master-inspecting', { round: payload.attempt, supervisionRound: s });
     const inspection = await runRole('master', {
       spec_path: 'SPEC.md', supervision_round: s, attempt: payload.attempt,
     });
@@ -726,11 +743,13 @@ async function runCarpenterSwarm(payload) {
 async function main() {
   const state = preflight();
   state.attemptHistory = [];
+  setStatus('starting', { branch: state.branch, maxRounds: CONFIG.maxRounds });
 
   let failedFindings = [];           // High-only, fed back to Carpenter (Reviewer->Carpenter edge)
 
   for (let attempt = 1; attempt <= CONFIG.maxRounds; attempt++) {
     log(`--- round ${attempt}/${CONFIG.maxRounds} ---`);
+    setStatus('round', { round: attempt });
 
     // Budget bound (ADR-0002): stop before overspending.
     if (tokensUsed > CONFIG.tokenBudget) {
@@ -773,6 +792,7 @@ async function main() {
 
     // 2) Reviewer audits (Carpenter->Reviewer edge, graph-aware). changed_files from git, not self-report.
     const escalating = attempt === CONFIG.maxRounds; // ask for hypothesis on the final attempt
+    setStatus('reviewer-auditing', { round: attempt });
     const review = await runRole('reviewer', {
       diff_ref: state.branch,
       spec_path: 'SPEC.md',
@@ -792,6 +812,7 @@ async function main() {
     // 3) Stop condition (ADR-0002): zero High == clean pass.
     //    Halt & Leave (ADR-0006): do NOT auto-merge; show the change surface.
     if (high.length === 0) {
+      setStatus('clean-pass', { round: attempt });
       log(`CLEAN PASS on round ${attempt} (tokens ~${tokensUsed}). Halt & Leave — not auto-merged.`);
       printMergeSummary(state);
       process.exit(0);

@@ -1,6 +1,9 @@
 # ship.js concurrency lock (ADR-0007)
 .ship.lock
 
+# ship.js live phase heartbeat (read by ship-watch.ps1)
+.ship-status.json
+
 # Orchestrator artifacts (generated per-run)
 ESCALATION.md
 graph.json
