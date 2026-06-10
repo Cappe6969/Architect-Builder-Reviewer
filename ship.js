@@ -808,4 +808,15 @@ async function main() {
   }
 }
 
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log([
+    'ship — Architect/Carpenter/Reviewer automated loop.',
+    'Usage: write SPEC.md at the repo root, then run `ship` (or `node ship.js`).',
+    'Flags:  --fresh   discard a prior swarm branch for this Spec (refuses if tracked files are dirty)',
+    'Env:    SHIP_CARPENTER_CMD / SHIP_MASTER_CMD / SHIP_REVIEWER_CMD   override engines (ADR-0004/0008)',
+    '        SHIP_TOKEN_BUDGET   token cap across all rounds (default 2,000,000)',
+  ].join('\n'));
+  process.exit(0);
+}
+
 main().catch((err) => fail(err.stack || String(err)));

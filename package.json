@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "description": "Automated Architect / Carpenter / Reviewer swarm loop for Claude Code — write a SPEC.md, run /ship, get a clean branch.",
   "bin": {
-    "ship": "./ship.js"
+    "ship": "./ship.js",
+    "ship-init": "./ship-init.js"
   },
   "scripts": {
     "init":     "node ship-init.js",

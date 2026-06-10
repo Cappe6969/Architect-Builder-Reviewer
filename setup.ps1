@@ -18,6 +18,19 @@ function Ok($t)   { Write-Host "  [OK]  $t" -ForegroundColor Green }
 function Warn($t) { Write-Host "  [!]   $t" -ForegroundColor Yellow }
 function Bad($t)  { Write-Host "  [X]   $t" -ForegroundColor Red }
 function Has($n)  { [bool](Get-Command $n -ErrorAction SilentlyContinue) }
+# Functional probe: a command can EXIST yet be BROKEN (e.g. a uv tool whose
+# pinned Python was deleted -> exit 103). Run a no-token liveness check and
+# report missing / broken / ok so the doctor can't give false greens.
+function Probe($n, [string[]]$liveArgs = @('--version')) {
+  if (-not (Has $n)) { return @{ state='missing'; detail='not on PATH' } }
+  try {
+    $out = (& $n @liveArgs 2>&1) -join ' '
+    if ($LASTEXITCODE -ne 0) {
+      return @{ state='broken'; detail=("exit {0}: {1}" -f $LASTEXITCODE, $out.Substring(0, [Math]::Min(140, $out.Length))) }
+    }
+    return @{ state='ok'; detail=$out.Substring(0, [Math]::Min(60, $out.Length)) }
+  } catch { return @{ state='broken'; detail=$_.Exception.Message } }
+}
 
 Write-Host "Swarm setup — Architect (Opus) / Carpenter (DeepSeek) / Reviewer (Codex)" -ForegroundColor White
 
@@ -94,6 +107,22 @@ Section "git"
 if (Has git) { Ok "git $(git --version)" } else { Bad "git missing — install from https://git-scm.com" }
 
 # ---------------------------------------------------------------------------
+# 5b. Global install — link `ship` + `ship-init` onto PATH (npm link) so the
+#     loop is ONE command in any project. A symlink, so repo edits reflect live.
+# ---------------------------------------------------------------------------
+Section "Global install (ship CLI)"
+if (-not $DoctorOnly) {
+  if (Has npm) {
+    Push-Location $PSScriptRoot
+    Warn "linking 'ship' + 'ship-init' globally (npm link)…"
+    npm link 2>&1 | Select-Object -Last 2
+    Pop-Location
+  } else { Bad "npm not available — install Node first, then re-run" }
+}
+if (Has ship) { Ok "ship on PATH ($((Get-Command ship).Source))" }
+else { Warn "ship not linked — run 'npm link' from $PSScriptRoot" }
+
+# ---------------------------------------------------------------------------
 # 6. Offline self-test (no engines, no tokens)
 # ---------------------------------------------------------------------------
 Section "Offline parser self-test"
@@ -104,18 +133,34 @@ if ((Has node) -and (Test-Path "$PSScriptRoot/simulate.js")) {
 # ---------------------------------------------------------------------------
 # Doctor summary
 # ---------------------------------------------------------------------------
-Section "Doctor summary"
-$rows = @(
-  @{ n='node>=22'; ok=((Has node) -and ([int]((node --version).TrimStart('v').Split('.')[0]) -ge 22)) }
-  @{ n='git';      ok=(Has git) }
-  @{ n='graphify'; ok=(Has graphify) }
-  @{ n='fcc-claude (Carpenter)'; ok=(Has fcc-claude) }
-  @{ n='codex (Reviewer)';       ok=(Has codex) }
+Section "Doctor summary (functional probes — not just 'is it on PATH')"
+# node needs >= 22 specifically; Probe only confirms it runs.
+$nodeP = Probe node
+if ($nodeP.state -eq 'ok') {
+  $maj = [int]((node --version).TrimStart('v').Split('.')[0])
+  if ($maj -lt 22) { $nodeP = @{ state='broken'; detail="$(node --version) < required 22" } }
+}
+$probes = @(
+  @{ n='node>=22';               p=$nodeP }
+  @{ n='git';                    p=(Probe git) }
+  @{ n='graphify';               p=(Probe graphify) }
+  @{ n='fcc-claude (Carpenter)'; p=(Probe fcc-claude) }
+  @{ n='codex (Reviewer)';       p=(Probe codex) }
+  @{ n='ship (CLI on PATH)';     p=(Probe ship --help) }
 )
-foreach ($r in $rows) { if ($r.ok) { Ok $r.n } else { Bad $r.n } }
+$bad = 0
+foreach ($r in $probes) {
+  switch ($r.p.state) {
+    'ok'      { Ok  ("{0,-26} {1}" -f $r.n, $r.p.detail) }
+    'broken'  { Bad ("{0,-26} BROKEN — {1}" -f $r.n, $r.p.detail); $bad++ }
+    'missing' { Warn ("{0,-26} missing" -f $r.n); $bad++ }
+  }
+}
+if ($bad -eq 0) { Ok "all engines functional" }
+else { Bad "$bad item(s) not functional — fix above. For live token-spending probes (codex -o, git effect): node calibrate.js" }
 
 Write-Host "`nNext:" -ForegroundColor White
 Write-Host "  1. Finish the two MANUAL items above (DeepSeek Admin UI; codex login)."
 Write-Host "  2. Verify the live engines:   node calibrate.js"
-Write-Host "  3. Scaffold a project:        ./swarm-init.ps1 -Target C:\Dev\my-app"
-Write-Host "  4. In that project: git commit an init, 'graphify .', write SPEC.md, then 'node ship.js' (or /ship)."
+Write-Host "  3. New project (fast path):   cd <project>; ship-init   (then edit SPEC.md; run 'ship' or /ship)"
+Write-Host "  4. 'ship' + 'ship-init' are global after the link above — no per-project file copy needed."
