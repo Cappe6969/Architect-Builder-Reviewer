@@ -13,7 +13,15 @@ The single artifact that carries the Architect's intent to the Carpenter. A file
 The role that decides. Claude Code running real **Opus** (`claude`). Owns planning, design/taste, terminology, and the Spec. Also applies fixes after review. Never grades its own output.
 
 ## Carpenter
-The role that builds. Claude Code running **DeepSeek V4** via the `free-claude-code` router (`fcc-claude`). Executes the Spec verbatim; makes **no** design decisions. Never sees secrets/IP (see workflow guardrails).
+The role that builds. Claude Code running **DeepSeek V4** via the `free-claude-code` router (`fcc-claude`). Executes the Spec verbatim; makes **no** design decisions. Never sees secrets/IP (see workflow guardrails). Realized as a **sub-swarm** — a Master Carpenter supervising one or more Worker Carpenters — entirely behind the `runRole` seam, so the outer loop still sees a single Carpenter.
+
+## Master Carpenter
+The supervising agent inside the Carpenter sub-swarm (the "foreman"). Owns **completeness, spec-adherence, and conciseness** of the build: every Spec requirement met, nothing invented or skipped, no over-engineering or needless code length. Explicitly does **not** judge correctness or hunt bugs — that stays with the independent Reviewer, because the Master shares the Workers' model and so cannot provide independent eyes (the self-preference trap). Carpenter token cost is treated as negligible, so its supervision may iterate freely. See [ADR-0008](docs/adr/0008-carpenter-sub-swarm.md).
+- _Avoid_: inner reviewer, QA, second reviewer (it is **not** a Reviewer — it never owns correctness).
+
+## Worker Carpenter
+The agent(s) inside the Carpenter sub-swarm that actually write the code, directed and corrected by the Master Carpenter.
+- _Avoid_: apprentice (casual prose only), builder, coder.
 
 ## Reviewer
 The role that breaks. **Codex (GPT-5.x)**, invoked **headlessly via the `codex exec` CLI** — *not* the in-session `/codex` plugin, because the automated loop drives engines headlessly (see [ADR-0004](docs/adr/0004-cross-model-orchestration-headless-cli.md)). Read-only; audits the Carpenter's output and returns prioritized findings with exact line refs. Never plans, never edits. *(The `/codex` plugin remains valid for manual, ad-hoc reviews outside the loop.)*
@@ -40,7 +48,10 @@ The structured JSON envelope passed across one edge of the loop, always **by ref
 Exact schemas are fixed during the Calibration Cycle. See [ADR-0001](docs/adr/0001-automated-agent-orchestration.md), [ADR-0002](docs/adr/0002-loop-termination-severity-gating.md).
 
 ## Retry Loop
-The autonomous inner loop between **Carpenter and Reviewer** for rounds 1–2 (and round 3's attempt). The Architect is **not** part of it — it spins Carpenter↔Reviewer until a Clean Pass or the Circuit Breaker trips. Keeps revision rounds free of human/Architect involvement.
+The autonomous **outer** loop between **Carpenter and Reviewer** for rounds 1–2 (and round 3's attempt). The Architect is **not** part of it — it spins Carpenter↔Reviewer until a Clean Pass or the Circuit Breaker trips. Keeps revision rounds free of human/Architect involvement.
+
+## Supervision Loop
+The autonomous **inner** loop inside the Carpenter sub-swarm, between the **Master Carpenter and Worker Carpenter** (parallel to the outer Retry Loop). The Worker builds; the Master inspects for completeness/spec-adherence/conciseness; if unsatisfied it returns corrections and the Worker fixes. **Bounded**: 1 build + up to 2 Master-directed fix rounds (`supervisionCap`). At the cap the Master hands the best-effort build to the Reviewer with its unresolved concerns noted — it **never escalates on its own**; the outer Circuit Breaker stays the only path to the Architect. See [ADR-0008](docs/adr/0008-carpenter-sub-swarm.md).
 
 ## Calibration Cycle
 The single manual run of the full loop, done once before automation, whose only purpose is to observe the real shape of each Handoff Payload and how the Reviewer formats its findings and pass/fail signal — so the `.js` workflow can be built against observed reality, not guesses.

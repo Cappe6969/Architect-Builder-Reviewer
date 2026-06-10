@@ -23,15 +23,23 @@
 
 'use strict';
 
-// Set DEEPSEEK_API_KEY in your environment before running (required for graphify).
-// Never hardcode a key here — this file is public.
-
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const os = require('node:os');
 const { defensiveJsonParse, extractUsageTokens, extractBody } = require('./lib/parse'); // shared contract (ADR-0002)
+
+// Load DEEPSEEK_API_KEY from ~/.fcc/.env so graphify can authenticate without
+// requiring a Windows env var (which would also lock out the fcc-server Admin UI).
+(function loadFccKey() {
+  if (process.env.DEEPSEEK_API_KEY) return;
+  try {
+    const fccEnv = path.join(os.homedir(), '.fcc', '.env');
+    const m = fs.readFileSync(fccEnv, 'utf8').match(/^DEEPSEEK_API_KEY=(.+)$/m);
+    if (m) process.env.DEEPSEEK_API_KEY = m[1].trim().replace(/^["']|["']$/g, '');
+  } catch { /* no ~/.fcc/.env present — graphify degrades to diff-only */ }
+})();
 
 // ---------------------------------------------------------------------------
 // Config
@@ -44,7 +52,8 @@ const CONFIG = {
   specPath:      path.join(ROOT, 'SPEC.md'),
   backlogPath:   path.join(ROOT, 'BACKLOG.md'),
   escalationPath:path.join(ROOT, 'ESCALATION.md'), // ADR-0003: written to a watched folder (repo root by default)
-  maxRounds:     3,                                // ADR-0002: circuit breaker
+  maxRounds:     3,                                // ADR-0002: circuit breaker (outer Retry Loop)
+  supervisionCap:2,                                // ADR-0008: inner Supervision Loop — Master-directed fix rounds
   tokenBudget:   Number(process.env.SHIP_TOKEN_BUDGET || 2_000_000), // ADR-0002 budget bound
 
   timeouts: { carpenterMs: 600_000, reviewerMs: 600_000 }, // per-call kill bounds
@@ -54,9 +63,18 @@ const CONFIG = {
   // to run outside a trusted repo without --skip-git-repo-check; --sandbox read-only
   // keeps it read-only; -o writes the final message to a file (pending one clean
   // `node calibrate.js` to confirm -o on this version). Carpenter still CALIBRATE.
+  // Each engine command can be overridden from the environment so the runRole
+  // seam (ADR-0004) is swappable WITHOUT a code edit — e.g. SHIP_CARPENTER_CMD=claude
+  // isolates the loop from a flaky router. fcc-claude is Claude Code pointed at
+  // DeepSeek, so it shares the exact same args as real `claude`.
   engines: {
-    carpenter: { cmd: 'fcc-claude', args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions'] },
-    reviewer:  { cmd: 'codex', args: ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '-o', '__OUTFILE__', '-'], outputFile: true },
+    // carpenter == the Worker Carpenter (ADR-0008): cheap bulk builder.
+    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'fcc-claude', args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions'] },
+    // master == the Master Carpenter (ADR-0008): Claude foreman. Same headless
+    // claude flags as a Worker, but it inspects (read-only judgment) instead of
+    // building. Claude emits a `usage` envelope, so its calls un-blind the budget.
+    master:    { cmd: process.env.SHIP_MASTER_CMD     || 'claude', args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions'] },
+    reviewer:  { cmd: process.env.SHIP_REVIEWER_CMD  || 'codex', args: ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '-o', '__OUTFILE__', '-'], outputFile: true },
   },
 };
 
@@ -176,13 +194,21 @@ async function autoFixRoleError(role, err, prompt, timeoutMs) {
     );
   }
 
+  if (role === 'master') {
+    // ADR-0008: the Master is a quality amplifier, not a gate. ANY Master engine
+    // failure degrades to satisfied so the Worker's best-effort build still
+    // reaches the independent Reviewer — the foreman never blocks the line.
+    warn(`master engine error (${err.code ?? 'non-zero exit'}): ${msg.slice(0, 120)} — degrading to satisfied (best-effort handoff)`);
+    return { satisfied: true, corrections: [], notes: `master supervision unavailable: ${msg.slice(0, 160)}` };
+  }
+
   return null; // unknown role — caller re-throws
 }
 
 async function runRole(role, payload) {
   const eng = CONFIG.engines[role];
   if (!eng) throw new Error(`unknown role: ${role}`);
-  const timeoutMs = role === 'carpenter' ? CONFIG.timeouts.carpenterMs : CONFIG.timeouts.reviewerMs;
+  const timeoutMs = role === 'reviewer' ? CONFIG.timeouts.reviewerMs : CONFIG.timeouts.carpenterMs;
 
   // Prompt is the JSON payload + a role contract, delivered on stdin (constraint #2).
   const prompt = buildPrompt(role, payload);
@@ -212,6 +238,12 @@ async function runRole(role, payload) {
     }
   } catch (err) {
     if (err.code === 'ETIMEDOUT') {
+      // ADR-0008: a Master timeout degrades to satisfied (amplifier, not gate).
+      if (role === 'master') {
+        warn(`master timed out after ${timeoutMs}ms — degrading to satisfied (best-effort handoff)`);
+        return { satisfied: true, corrections: [],
+          notes: `master timed out after ${timeoutMs}ms; handed off best-effort` };
+      }
       // constraint #3: timeout becomes a failed round, surfaced as a synthetic High finding.
       return { verdict: 'fail', timedOut: true,
         findings: [{ severity: 'High', file: '(orchestrator)', line: 0,
@@ -246,12 +278,15 @@ async function runRole(role, payload) {
   const isValidShape = (v) => {
     if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
     if (role === 'reviewer') return Array.isArray(v.findings);
+    if (role === 'master') return typeof v.satisfied === 'boolean'; // ADR-0008 inspection verdict
     return 'status' in v; // carpenter liveness check (truth comes from git regardless)
   };
 
   if (parsed == null || !isValidShape(parsed)) {
     log(`${role} output ${parsed == null ? 'unparseable' : 'wrong-shape'}; requesting one coerce-to-JSON pass`);
-    const required = role === 'reviewer' ? 'verdict (string), findings (array)' : 'status (string), changed_files (array)';
+    const required = role === 'reviewer' ? 'verdict (string), findings (array)'
+                   : role === 'master'   ? 'satisfied (boolean), corrections (array)'
+                   : 'status (string), changed_files (array)';
     try {
       const coerced = await spawnCapture(
         CONFIG.engines.carpenter.cmd, CONFIG.engines.carpenter.args,
@@ -265,7 +300,14 @@ async function runRole(role, payload) {
       parsed = null;
     }
     if (!isValidShape(parsed)) {
-      warn(`${role} output failed shape validation — treating as High finding`);
+      warn(`${role} output failed shape validation`);
+      if (role === 'master') {
+        // ADR-0008: the Master is a quality amplifier, not a gate. A foreman that
+        // can't produce a verdict must NOT block the build — degrade to satisfied
+        // and hand the best-effort work onward to the independent Reviewer.
+        return { satisfied: true, corrections: [],
+          notes: 'master verdict unavailable (bad output shape); handed off best-effort' };
+      }
       return { verdict: 'fail',
         findings: [{ severity: 'High', file: '(orchestrator)', line: 0,
           summary: `${role} output did not match expected JSON schema`,
@@ -280,17 +322,46 @@ async function runRole(role, payload) {
 // ---------------------------------------------------------------------------
 function buildPrompt(role, payload) {
   if (role === 'carpenter') {
-    const retry = Number(payload.attempt) > 1; // bug #1 fix: stateless headless call has no memory of prior rounds
+    // Worker Carpenter (ADR-0008). Three build modes, in priority order:
+    //   1. master_corrections present → apply the Master's inner-loop corrections.
+    //   2. outer retry (attempt > 1)  → fix the Reviewer's High findings.
+    //   3. initial build              → build the Spec from scratch.
+    const fixingMaster = Array.isArray(payload.master_corrections) && payload.master_corrections.length > 0;
+    const retry = Number(payload.attempt) > 1 && !fixingMaster; // bug #1 fix: stateless headless call has no memory of prior rounds
+    let task;
+    if (fixingMaster) {
+      task = 'The MASTER CARPENTER inspected your build and requires the corrections below before it can ship. '
+        + 'Apply ONLY these corrections to the files already on disk; do NOT rebuild from scratch.';
+    } else if (retry) {
+      task = `This is Round ${payload.attempt}. Your previous work is ALREADY COMMITTED on the current branch. `
+        + 'Read the existing diff, then fix ONLY the specific High-severity findings listed below. '
+        + 'Do NOT rebuild the feature from scratch.';
+    } else {
+      task = 'Build EXACTLY what the Spec says, from scratch.';
+    }
     return [
-      'You are the CARPENTER. Make no design decisions.',
-      retry
-        ? `This is Round ${payload.attempt}. Your previous work is ALREADY COMMITTED on the current branch. `
-          + 'Read the existing diff, then fix ONLY the specific High-severity findings listed below. '
-          + 'Do NOT rebuild the feature from scratch.'
-        : 'Build EXACTLY what the Spec says, from scratch.',
+      'You are the WORKER CARPENTER. Make no design decisions.',
+      task,
       'Re-read the Spec (SPEC.md) from disk now; it is the sole source of truth.',
       'Edit files on disk only. Do NOT run git — the orchestrator commits for you.',
       'Respond ONLY with JSON: {"status":"built","changed_files":[...]}',
+      '',
+      JSON.stringify(payload, null, 2),
+    ].join('\n');
+  }
+  if (role === 'master') {
+    // Master Carpenter (ADR-0008): inspects the Worker's UNCOMMITTED tree for
+    // completeness + conciseness only. Never judges correctness (Reviewer's job).
+    return [
+      'You are the MASTER CARPENTER (foreman). You SUPERVISE the Worker — you do not write features yourself.',
+      "Inspect the Worker's CURRENT UNCOMMITTED working tree against the Spec. Run `git status` first (brand-new files are UNTRACKED — read them directly), then `git diff` for edits to existing files, and re-read SPEC.md from disk.",
+      'Judge ONLY these two things, nothing else:',
+      '  (1) Completeness & spec-adherence — every Spec requirement is built; nothing required is skipped; nothing outside the Spec was invented.',
+      '  (2) Conciseness — no over-engineering, dead code, duplication, or needless length.',
+      "Do NOT judge correctness, logic bugs, or edge cases — that is the independent Reviewer's job, not yours.",
+      'If the build satisfies (1) and (2), set satisfied=true and corrections=[].',
+      'Otherwise set satisfied=false and give SPECIFIC, actionable corrections the Worker can apply directly.',
+      'Respond ONLY with JSON: {"satisfied":true|false,"corrections":[{"file","issue","fix"}],"notes":"short summary of any unresolved concern, or empty"}',
       '',
       JSON.stringify(payload, null, 2),
     ].join('\n');
@@ -441,6 +512,16 @@ function preflight() {
     }
     runGit(['checkout', branch]);
     if (ahead > 0 && FRESH) {
+      // SAFETY: `git reset --hard` reverts tracked-file changes in the working tree.
+      // Refuse --fresh while tracked files are dirty so it can never silently destroy
+      // in-progress edits. (Untracked files like SPEC.md survive a hard reset, so
+      // they are ignored here.) Learned the hard way — see ADR-0008 consequences.
+      const dirty = runGit(['status', '--porcelain']).split('\n').filter((l) => l && !l.startsWith('??'));
+      if (dirty.length) {
+        fail(`--fresh would 'git reset --hard ${baseBranch}' and REVERT these uncommitted tracked changes:\n`
+          + dirty.map((l) => '    ' + l).join('\n')
+          + `\n  Commit or stash them first, then re-run with --fresh.`);
+      }
       runGit(['reset', '--hard', baseBranch]);
       log(`preflight: --fresh — discarded ${ahead} prior commit(s); ${branch} reset to ${baseBranch}`);
     }
@@ -499,7 +580,7 @@ const ORCH_EXCLUDES = [
   ':(exclude)graph.json', ':(exclude)graph.html', ':(exclude)GRAPH_REPORT.md',
   ':(exclude).claude/', ':(exclude)ship.js', ':(exclude)simulate.js',
   ':(exclude)calibrate.js', ':(exclude)lib/', ':(exclude).vscode/',
-  ':(exclude).ship.lock',
+  // .ship.lock is gitignored — no explicit exclude needed (git rejects it as redundant)
   // non-work sibling dirs present in this repo — exclude so they never bloat the diff
   ':(exclude)free-claude-code/', ':(exclude)llm-council-temp/', ':(exclude)ruflo/',
 ];
@@ -589,6 +670,57 @@ function writeEscalation(state, highFindings, reviewerResult) {
 }
 
 // ---------------------------------------------------------------------------
+// Carpenter sub-swarm (ADR-0008) — the Supervision Loop runs entirely behind
+// what the outer loop sees as a single Carpenter. The Worker (DeepSeek) builds
+// on the UNCOMMITTED working tree; the Master (Claude) inspects that tree for
+// completeness + conciseness ONLY (never correctness) and directs up to
+// supervisionCap fixes. At the cap the best-effort build is handed onward with
+// the Master's notes; the Master NEVER escalates — the outer Circuit Breaker is
+// the only path to the Architect. Returns { masterNotes } for the Reviewer payload.
+// ---------------------------------------------------------------------------
+async function runCarpenterSwarm(payload) {
+  // Worker builds (initial) or fixes the Reviewer's High findings (outer retry).
+  await runRole('carpenter', payload);
+
+  let masterNotes = '';
+  for (let s = 1; s <= CONFIG.supervisionCap; s++) {
+    // ADR-0002 budget guard, applied mid-supervision (Master/Claude calls accrue real usage).
+    if (tokensUsed > CONFIG.tokenBudget) {
+      masterNotes = 'supervision halted early: token budget reached';
+      log(`supervision: token budget reached (${tokensUsed}/${CONFIG.tokenBudget}); handing off best-effort`);
+      break;
+    }
+
+    const inspection = await runRole('master', {
+      spec_path: 'SPEC.md', supervision_round: s, attempt: payload.attempt,
+    });
+
+    if (inspection.satisfied) {
+      log(`supervision: Master satisfied after ${s - 1} fix round(s)`);
+      masterNotes = inspection.notes || '';
+      break;
+    }
+
+    const corrections = Array.isArray(inspection.corrections) ? inspection.corrections : [];
+    log(`supervision round ${s}/${CONFIG.supervisionCap}: Master unsatisfied — ${corrections.length} correction(s)`);
+
+    // Worker applies the Master's corrections (no rebuild).
+    await runRole('carpenter', {
+      spec_path: 'SPEC.md', master_corrections: corrections,
+      attempt: payload.attempt, supervision_round: s,
+    });
+
+    masterNotes = (inspection.notes ? inspection.notes + ' ' : '')
+      + `(supervision round ${s}: ${corrections.length} correction(s) applied)`;
+    if (s === CONFIG.supervisionCap) {
+      log('supervision: cap reached — handing best-effort build to Reviewer (final fixes not re-inspected)');
+      masterNotes += ' — supervision cap reached; final fixes not re-inspected';
+    }
+  }
+  return { masterNotes };
+}
+
+// ---------------------------------------------------------------------------
 // Main loop — Retry Loop spins Carpenter <-> Reviewer (ADR-0002 topology)
 // ---------------------------------------------------------------------------
 async function main() {
@@ -614,7 +746,7 @@ async function main() {
       ? { spec_path: 'SPEC.md', token_budget: CONFIG.tokenBudget, build_context: [], attempt }
       : { spec_path: 'SPEC.md', failed_findings: failedFindings, attempt };
     const preHead = spawnSyncCheck('git', ['rev-parse', 'HEAD']).trim();
-    await runRole('carpenter', carpenterPayload);
+    const swarm = await runCarpenterSwarm(carpenterPayload); // ADR-0008: Worker build + Master Supervision Loop
 
     // 1b) Orchestrator commits the Carpenter's work; derive the TRUE diff (bug #2 fix).
     const commit = carpenterCommit(attempt, preHead);
@@ -646,6 +778,7 @@ async function main() {
       spec_path: 'SPEC.md',
       graph_ref: state.graphRef,
       changed_files: commit.files,
+      master_notes: swarm.masterNotes, // ADR-0008: Master's unresolved concerns (advisory; Reviewer decides independently)
       escalating,
       attempt_history: state.attemptHistory,
     });
