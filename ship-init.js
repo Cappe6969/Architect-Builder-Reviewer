@@ -80,6 +80,36 @@ if (!fs.existsSync(CLAUDE_PATH)) {
 }
 
 // ---------------------------------------------------------------------------
+// .gitignore — keep orchestrator runtime artifacts out of the working tree so
+// `git status` stays clean and they never reach a commit.
+// ---------------------------------------------------------------------------
+const GITIGNORE_PATH = path.join(TARGET, '.gitignore');
+const GI_MARKER = '# ship orchestrator artifacts';
+const GI_BLOCK = `${GI_MARKER}
+.ship.lock
+.ship-status.json
+.ship-result.json
+.ship-trace.jsonl
+ESCALATION.md
+graph.json
+graph.html
+GRAPH_REPORT.md
+graphify-out/
+# secrets live in their tools (fcc admin UI / codex login), never the repo
+.env
+.env.local`;
+
+if (!fs.existsSync(GITIGNORE_PATH)) {
+  fs.writeFileSync(GITIGNORE_PATH, GI_BLOCK + '\n');
+  ok('.gitignore created (ship artifacts ignored)');
+} else if (fs.readFileSync(GITIGNORE_PATH, 'utf8').includes(GI_MARKER)) {
+  info('.gitignore already ignores ship artifacts — skipping');
+} else {
+  fs.appendFileSync(GITIGNORE_PATH, '\n' + GI_BLOCK + '\n');
+  ok('ship artifacts appended to existing .gitignore');
+}
+
+// ---------------------------------------------------------------------------
 // SPEC.md placeholder (only if missing)
 // ---------------------------------------------------------------------------
 const SPEC_PATH = path.join(TARGET, 'SPEC.md');

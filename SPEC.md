@@ -1,19 +1,25 @@
-# Spec: Swarm Pipeline Smoke Test
+# Add a /health route to the HTTP server
+
+> This is an EXAMPLE spec. Replace its contents with your own task, then run
+> `ship` (or `/ship` inside Claude Code). Keep the shape: one H1 title, concrete
+> requirements, exact filenames, explicit acceptance criteria, and an out-of-scope
+> list. The Carpenter builds EXACTLY what is written here and makes no design
+> decisions — so be specific.
 
 ## Goal
-Verify the Architect / Carpenter / Reviewer pipeline is wired up correctly end-to-end.
+Expose a health-check endpoint so a load balancer can tell the service is up.
 
 ## Task
-Create a file called `HELLO.md` in the project root containing a single line:
+Add a `GET /health` route to the existing Express app in `src/server.js`.
 
-```
-Swarm online.
-```
+- It must respond `200` with JSON body `{ "status": "ok" }`.
+- Register it before the catch-all 404 handler.
 
 ## Acceptance criteria
-- `HELLO.md` exists in the repo root
-- Contents are exactly `Swarm online.` (one line, no extra whitespace)
-- All existing files are untouched
+- `GET /health` returns HTTP 200 and `{"status":"ok"}`.
+- No existing route's behaviour changes.
+- A test in `src/server.test.js` asserts the 200 + body.
 
 ## Out of scope
-- Any other changes to the codebase
+- Auth, rate limiting, or readiness/liveness distinction.
+- Any change to other routes or the build config.

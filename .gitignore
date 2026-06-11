@@ -4,12 +4,23 @@
 # ship.js live phase heartbeat (read by ship-watch.ps1)
 .ship-status.json
 
+# ship.js terminal-state result (read by ship-chat)
+.ship-result.json
+
+# ship.js per-agent event trace (read by ship-ui dashboard)
+.ship-trace.jsonl
+
 # Orchestrator artifacts (generated per-run)
 ESCALATION.md
 graph.json
 graph.html
 GRAPH_REPORT.md
 graphify-out/
+
+# Secrets — never commit. Keys live in their tools (fcc admin UI / codex login),
+# not here. This guard exists only so a stray local .env can't leak.
+.env
+.env.local
 
 # Node
 node_modules/

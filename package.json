@@ -4,7 +4,9 @@
   "description": "Automated Architect / Carpenter / Reviewer swarm loop for Claude Code — write a SPEC.md, run /ship, get a clean branch.",
   "bin": {
     "ship": "./ship.js",
-    "ship-init": "./ship-init.js"
+    "ship-init": "./ship-init.js",
+    "ship-chat": "./ship-chat.js",
+    "ship-ui": "./ship-ui.js"
   },
   "scripts": {
     "init":     "node ship-init.js",
@@ -12,6 +14,6 @@
     "calibrate":"node calibrate.js"
   },
   "engines": {
-    "node": ">=18.18"
+    "node": ">=22"
   }
 }
