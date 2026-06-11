@@ -48,6 +48,9 @@ const ROOT = process.cwd();
 const FRESH = process.argv.includes('--fresh'); // ADR-0005: opt into discarding an existing swarm branch
 const LOCK_PATH = path.join(process.cwd(), '.ship.lock'); // ADR-0007: single-run mutual exclusion
 const STATUS_PATH = path.join(process.cwd(), '.ship-status.json'); // live phase heartbeat for ship-watch.ps1 / notifiers
+const RESULT_PATH = path.join(process.cwd(), '.ship-result.json'); // terminal-state result (summary/escalation) read by ship-chat
+const TRACE_PATH  = path.join(process.cwd(), '.ship-trace.jsonl');  // append-only per-agent event log read by ship-ui
+const TRACE_STREAM = !!process.env.SHIP_TRACE; // opt-in (set by ship-ui): stream token-level reasoning, not just milestones
 
 const CONFIG = {
   specPath:      path.join(ROOT, 'SPEC.md'),
@@ -92,15 +95,29 @@ const bell = () => process.stdout.write('\x07'); // ADR-0003: native terminal be
 // Carries branch/round forward so each call only needs to set what changed.
 let _status = {};
 function setStatus(phase, extra = {}) {
-  _status = { ..._status, ...extra };
+  _status = { ..._status, ...extra, phase }; // keep phase so trace() can stamp events
   try {
     fs.writeFileSync(STATUS_PATH,
-      JSON.stringify({ phase, ..._status, pid: process.pid, ts: new Date().toISOString() }) + '\n');
+      JSON.stringify({ ..._status, pid: process.pid, ts: new Date().toISOString() }) + '\n');
   } catch { /* heartbeat is cosmetic — ignore write failures */ }
 }
 
 function slugify(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'task';
+}
+
+// Per-agent event trace for the ship-ui dashboard. Best-effort and append-only:
+// one JSON object per line { seq, ts, agent, phase, round, kind, text }. agent ∈
+// {worker,master,reviewer,orchestrator}; kind ∈ {action,reasoning,result,verdict,note}.
+// Cosmetic like setStatus — never throws, never blocks the loop.
+let _seq = 0;
+function trace(agent, kind, text, extra = {}) {
+  if (text == null || text === '') return;
+  _seq += 1;
+  const ev = { seq: _seq, ts: new Date().toISOString(), agent, kind,
+    phase: _status.phase, round: _status.round, ...extra, text: String(text) };
+  try { fs.appendFileSync(TRACE_PATH, JSON.stringify(ev) + '\n'); }
+  catch { /* trace is cosmetic — ignore write failures */ }
 }
 
 /**
@@ -109,7 +126,7 @@ function slugify(s) {
  * A timeout rejects with code 'ETIMEDOUT' so callers can convert it into a
  * failed round rather than a crash (constraint #3).
  */
-function spawnCapture(cmd, args, input, timeoutMs, { passthroughStdout = false } = {}) {
+function spawnCapture(cmd, args, input, timeoutMs, { passthroughStdout = false, onStdout = null } = {}) {
   return new Promise((resolve, reject) => {
     // `settled` + independent timeout: a missing/hanging engine (no 'close'
     // event, dead stdin pipe on Windows) must NEVER deadlock the orchestrator.
@@ -132,6 +149,7 @@ function spawnCapture(cmd, args, input, timeoutMs, { passthroughStdout = false }
     child.stdout.on('data', (d) => {
       stdout += d;
       if (passthroughStdout) process.stdout.write(d);
+      if (onStdout) { try { onStdout(d.toString()); } catch { /* tee is cosmetic */ } }
     });
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('error', (err) => finish(reject, err));
@@ -142,6 +160,83 @@ function spawnCapture(cmd, args, input, timeoutMs, { passthroughStdout = false }
 
     try { if (input != null) child.stdin.write(input); child.stdin.end(); }
     catch { /* stdin unavailable; rely on error/close/timeout to settle */ }
+  });
+}
+
+// streamArgs — turn a `--output-format json` engine arg list into a streaming
+// one (`stream-json` + `--verbose`, required together by claude -p). Used only
+// when TRACE_STREAM is on, for the Worker/Master, so their reasoning streams.
+function streamArgs(args) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--output-format' && args[i + 1] === 'json') {
+      out.push('--output-format', 'stream-json', '--verbose'); i++; continue;
+    }
+    out.push(args[i]);
+  }
+  return out;
+}
+
+// spawnStream — like spawnCapture, but for claude `stream-json`: it parses the
+// newline-delimited event stream live, forwards each assistant thinking/text/
+// tool_use to trace(agent, …) for the ship-ui dashboard, and resolves with the
+// final `result` event re-serialised as a plain `{result,usage}` envelope so the
+// EXISTING parse path (defensiveJsonParse → extractBody) is unchanged. Same
+// timeout/kill discipline as spawnCapture; any parse hiccup is swallowed (the
+// stream is cosmetic — only the result envelope matters for the loop).
+function spawnStream(cmd, args, input, timeoutMs, agent) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, val) => { if (settled) return; settled = true; clearTimeout(timer); fn(val); };
+    let child;
+    try { child = spawn(cmd, args, { shell: process.platform === 'win32', cwd: ROOT }); }
+    catch (err) { return reject(err); }
+
+    let buf = '', stderr = '', resultEnvelope = null;
+    const timer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch {}
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5_000).unref();
+      const e = new Error(`timeout after ${timeoutMs}ms`); e.code = 'ETIMEDOUT';
+      finish(reject, e);
+    }, timeoutMs);
+
+    const handleEvent = (ev) => {
+      if (!ev || typeof ev !== 'object') return;
+      if (ev.type === 'assistant' && ev.message && Array.isArray(ev.message.content)) {
+        for (const b of ev.message.content) {
+          if (b.type === 'thinking' && b.thinking) trace(agent, 'reasoning', b.thinking.trim());
+          else if (b.type === 'text' && b.text) trace(agent, 'reasoning', b.text.trim());
+          else if (b.type === 'tool_use') {
+            const inp = b.input || {};
+            const target = inp.file_path || inp.path || inp.command || inp.pattern || '';
+            trace(agent, 'action', `${b.name}${target ? ': ' + String(target).slice(0, 120) : ''}`);
+          }
+        }
+      } else if (ev.type === 'result') {
+        resultEnvelope = { result: ev.result, usage: ev.usage };
+      }
+    };
+
+    child.stdin.on('error', () => {});
+    child.stdout.on('data', (d) => {
+      buf += d.toString();
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+        if (!line) continue;
+        try { handleEvent(JSON.parse(line)); } catch { /* partial/non-JSON line */ }
+      }
+    });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (err) => finish(reject, err));
+    child.on('close', (code) => {
+      if (code !== 0) { const e = new Error(`exit ${code}: ${stderr.slice(0, 500)}`); e.code = code; return finish(reject, e); }
+      // Resolve with the result envelope as JSON (parse path expects {result,usage}).
+      finish(resolve, JSON.stringify(resultEnvelope || { result: buf }));
+    });
+
+    try { if (input != null) child.stdin.write(input); child.stdin.end(); }
+    catch {}
   });
 }
 
@@ -236,9 +331,27 @@ async function runRole(role, payload) {
   }
 
   if (role === 'reviewer') log('reviewer: running (output streaming below)');
+  // Tee the Reviewer's live stdout into the trace (line-buffered) so the ship-ui
+  // dashboard shows its reasoning as it audits. Cosmetic; codex's final JSON goes
+  // to the output file, so this never affects parsing.
+  let teeBuf = '';
+  const reviewerTee = (chunk) => {
+    teeBuf += chunk;
+    let nl;
+    while ((nl = teeBuf.indexOf('\n')) >= 0) {
+      const line = teeBuf.slice(0, nl).trim(); teeBuf = teeBuf.slice(nl + 1);
+      if (line) trace('reviewer', 'reasoning', line);
+    }
+  };
+  // Opt-in (ship-ui sets SHIP_TRACE): stream the Worker/Master reasoning live.
+  const streaming = TRACE_STREAM && (role === 'carpenter' || role === 'master');
+  const agent = role === 'carpenter' ? 'worker' : role;
   let raw;
   try {
-    const stdout = await spawnCapture(eng.cmd, args, prompt, timeoutMs, { passthroughStdout: role === 'reviewer' });
+    const stdout = streaming
+      ? await spawnStream(eng.cmd, streamArgs(args), prompt, timeoutMs, agent)
+      : await spawnCapture(eng.cmd, args, prompt, timeoutMs,
+          { passthroughStdout: role === 'reviewer', onStdout: role === 'reviewer' ? reviewerTee : null });
     if (eng.outputFile) {
       try { raw = fs.readFileSync(outFile, 'utf8'); }
       catch (readErr) {
@@ -584,20 +697,27 @@ function spawnSyncCheck(cmd, args, timeoutMs) {
   return r.stdout;
 }
 
-// Orchestrator-managed files — excluded from the Carpenter's commit so the
+// Orchestrator-managed paths — kept OUT of the Carpenter's commit so the
 // Reviewer's diff is PURE feature work (no graph/backlog/spec/escalation churn).
-// ORCH_EXCLUDES: orchestrator-managed files + any dirs that were already untracked
-// before the run (non-work dirs swept up by `git add -- .`). Keep this in sync
-// with whatever untracked dirs live alongside the work tree.
-const ORCH_EXCLUDES = [
-  ':(exclude)SPEC.md', ':(exclude)BACKLOG.md', ':(exclude)ESCALATION.md',
-  ':(exclude)graph.json', ':(exclude)graph.html', ':(exclude)GRAPH_REPORT.md',
-  ':(exclude).claude/', ':(exclude)ship.js', ':(exclude)simulate.js',
-  ':(exclude)calibrate.js', ':(exclude)lib/', ':(exclude).vscode/',
-  // .ship.lock is gitignored — no explicit exclude needed (git rejects it as redundant)
-  // non-work sibling dirs present in this repo — exclude so they never bloat the diff
-  ':(exclude)free-claude-code/', ':(exclude)llm-council-temp/', ':(exclude)ruflo/',
+// Two forms of the same list:
+//   ORCH_PATHS    — plain paths, for `git reset` (unstage) and `git rm --cached`.
+//   ORCH_EXCLUDES — :(exclude) pathspecs, for the `git diff` that derives the
+//                   changed-file set (diff never errors on ignored paths).
+// graphify-out/ is intentionally NOT here: it's gitignored, and `git add -A`
+// silently skips gitignored files. (Listing it under an explicit `.` pathspec is
+// exactly what made `git add` abort once graphify started producing output.)
+const ORCH_PATHS = [
+  'SPEC.md', 'BACKLOG.md', 'ESCALATION.md',
+  'graph.json', 'graph.html', 'GRAPH_REPORT.md', 'graphify-out/',
+  '.claude/', 'ship.js', 'simulate.js', 'calibrate.js', 'lib/', '.vscode/',
+  '.ship-result.json', '.ship-trace.jsonl', '.ship-status.json', '.ship.lock',
+  // non-work sibling dirs present in some layouts — keep out of the diff
+  'free-claude-code/', 'llm-council-temp/', 'ruflo/',
 ];
+// graphify-out/ is unstaged via reset (above), so it's kept out of the commit even
+// in a project that hasn't gitignored it — without ever being an `add` pathspec
+// (which is what made `git add` abort once graphify started producing output).
+const ORCH_EXCLUDES = ORCH_PATHS.map((p) => `:(exclude)${p}`);
 
 /**
  * carpenterCommit — bug #2 fix. The ORCHESTRATOR controls git state; never trust
@@ -605,9 +725,15 @@ const ORCH_EXCLUDES = [
  * orchestrator files), commit it, and return the TRUE changed-file set derived
  * from git (not the Carpenter's self-report). `changed === false` => no-op round.
  * Works whether the LLM committed on its own or left the tree dirty.
+ *
+ * Staging uses `git add -A` (no positive pathspec) so gitignored artifacts like
+ * graphify-out/ are silently skipped rather than aborting the add; the
+ * orchestrator-managed paths are then unstaged.
  */
 function carpenterCommit(round, preHead) {
-  spawnSyncCheck('git', ['add', '--', '.', ...ORCH_EXCLUDES]);
+  spawnSyncCheck('git', ['add', '-A']);
+  // Unstage orchestrator files (no-op for any that aren't staged/don't exist here).
+  try { spawnSyncCheck('git', ['reset', '-q', '--', ...ORCH_PATHS]); } catch { /* none staged */ }
   const staged = spawnSyncCheck('git', ['diff', '--cached', '--name-only']).trim();
   if (staged) spawnSyncCheck('git', ['commit', '-m', `carpenter: automated build round ${round}`]);
   const head = spawnSyncCheck('git', ['rev-parse', 'HEAD']).trim();
@@ -658,12 +784,88 @@ function printMergeSummary(state) {
   try {
     const stat = spawnSyncCheck('git', ['diff', '--stat', `${state.baseBranch}...HEAD`]).trimEnd();
     console.log(`\n  Change surface (${state.baseBranch}...${state.branch}):`);
-    console.log(stat ? stat.split('\n').map((l) => '    ' + l).join('\n') : '    (no diff)');
+    if (!stat) { console.log('    (no diff)'); }
+    else {
+      const lines = stat.split('\n');
+      const CAP = 14; // keep the terminal readable when a diff touches many files
+      // The last `git diff --stat` line is the "N files changed" summary — always keep it.
+      const summaryLine = lines[lines.length - 1];
+      const fileLines = lines.slice(0, -1);
+      const shown = fileLines.slice(0, CAP);
+      console.log(shown.map((l) => '    ' + l).join('\n'));
+      if (fileLines.length > CAP) console.log(`    … and ${fileLines.length - CAP} more file(s)`);
+      console.log('    ' + summaryLine);
+    }
   } catch (e) {
     log(`(could not compute git diff --stat: ${e.message})`);
   }
   console.log('\n  Review, then merge when satisfied:');
   console.log(`    git checkout ${state.baseBranch} && git merge ${state.branch}\n`);
+}
+
+// writeResult — persist the run's terminal state (clean pass or escalation) as
+// JSON so a front-end (ship-chat) can render an "answer" without scraping logs.
+// Best-effort and gitignored/excluded; never blocks the loop.
+function writeResult(obj) {
+  try { fs.writeFileSync(RESULT_PATH, JSON.stringify(obj, null, 2) + '\n'); }
+  catch { /* result file is cosmetic — ignore write failures */ }
+}
+
+// wrapText — soft-wrap prose to `width` columns, preserving the engine's own
+// line breaks. ASCII-only output (no box-drawing) for Windows-console safety.
+function wrapText(text, width = 64) {
+  const out = [];
+  for (const para of String(text).split('\n')) {
+    if (!para.trim()) { out.push(''); continue; }
+    let line = '';
+    for (const word of para.trim().split(/\s+/)) {
+      if (line && (line.length + 1 + word.length) > width) { out.push(line); line = word; }
+      else { line = line ? `${line} ${word}` : word; }
+    }
+    if (line) out.push(line);
+  }
+  return out;
+}
+
+// generateSummary — the "answer". Best-effort: ask the Master engine (Claude,
+// which un-blinds tokens) to describe in plain English what the final diff
+// implemented relative to SPEC.md. Returns a string, or null on ANY failure —
+// the caller simply omits the section, so this never blocks a clean pass.
+async function generateSummary(state) {
+  let spec = '';
+  try { spec = fs.readFileSync(CONFIG.specPath, 'utf8'); } catch { /* spec optional for the summary */ }
+  let diff = '';
+  try { diff = spawnSyncCheck('git', ['diff', `${state.baseBranch}...HEAD`]); } catch { return null; }
+  if (!diff.trim()) return null;
+  const MAX = 24_000; // cap so a large change set can't blow the prompt / latency
+  if (diff.length > MAX) diff = diff.slice(0, MAX) + '\n...[diff truncated]...';
+
+  const prompt =
+    'You are reporting back to the person who requested this work; they may not be an engineer. '
+    + 'Read the TASK (from SPEC.md) and the GIT DIFF of what was just built, then write a short, '
+    + 'plain-English summary of WHAT WAS IMPLEMENTED: what changed, which files, and how it satisfies the task. '
+    + 'Use 3-6 sentences or short bullet points. No code blocks, no preamble, no headings — just the summary.\n\n'
+    + `=== TASK (SPEC.md) ===\n${spec}\n\n=== GIT DIFF (${state.baseBranch}...HEAD) ===\n${diff}\n`;
+
+  const eng = CONFIG.engines.master;
+  try {
+    const stdout = await spawnCapture(eng.cmd, eng.args, prompt, 180_000);
+    const outer = defensiveJsonParse(stdout);
+    tokensUsed += extractUsageTokens(outer);
+    let body = extractBody(outer);
+    if (body && typeof body === 'object') body = body.result || '';
+    const text = (typeof body === 'string' && body.trim() ? body : stdout || '').trim();
+    return text || null;
+  } catch { return null; } // master unavailable/slow — degrade to no summary
+}
+
+// printImplementationSummary — render the plain-English answer in an ASCII box.
+function printImplementationSummary(summary) {
+  if (!summary) return;
+  const bar = '  +' + '-'.repeat(50);
+  console.log('\n' + bar.replace('+--', '+-- What was implemented '));
+  for (const line of wrapText(summary, 64)) console.log('  | ' + line);
+  console.log(bar);
 }
 
 function writeEscalation(state, highFindings, reviewerResult) {
@@ -680,6 +882,9 @@ function writeEscalation(state, highFindings, reviewerResult) {
       || { classification: 'context_gap', rationale: 'Reviewer did not return a hypothesis.' },
   };
   fs.writeFileSync(CONFIG.escalationPath, JSON.stringify(payload, null, 2) + '\n');
+  writeResult({ ok: false, branch: state.branch, baseBranch: state.baseBranch,
+    reason: payload.root_cause_hypothesis?.classification || 'circuit_breaker_tripped',
+    findings: highFindings, escalation_path: 'ESCALATION.md', ts: new Date().toISOString() });
   bell(); // ADR-0003: native alert; external watcher/orchestrator handles the rest
   log(`ESCALATION.md written (${highFindings.length} unresolved High). Architect intervention required.`);
 }
@@ -696,6 +901,9 @@ function writeEscalation(state, highFindings, reviewerResult) {
 async function runCarpenterSwarm(payload) {
   // Worker builds (initial) or fixes the Reviewer's High findings (outer retry).
   setStatus('worker-building', { round: payload.attempt });
+  trace('worker', 'action', payload.attempt > 1
+    ? `Round ${payload.attempt}: fixing the Reviewer's findings`
+    : 'Building from SPEC.md');
   await runRole('carpenter', payload);
 
   let masterNotes = '';
@@ -708,20 +916,26 @@ async function runCarpenterSwarm(payload) {
     }
 
     setStatus('master-inspecting', { round: payload.attempt, supervisionRound: s });
+    trace('master', 'action', `Inspecting the Worker's build (supervision ${s}/${CONFIG.supervisionCap})`);
     const inspection = await runRole('master', {
       spec_path: 'SPEC.md', supervision_round: s, attempt: payload.attempt,
     });
 
     if (inspection.satisfied) {
       log(`supervision: Master satisfied after ${s - 1} fix round(s)`);
+      trace('master', 'verdict', `Satisfied after ${s - 1} fix round(s)`
+        + (inspection.notes ? ` — ${inspection.notes}` : ''));
       masterNotes = inspection.notes || '';
       break;
     }
 
     const corrections = Array.isArray(inspection.corrections) ? inspection.corrections : [];
     log(`supervision round ${s}/${CONFIG.supervisionCap}: Master unsatisfied — ${corrections.length} correction(s)`);
+    trace('master', 'note', `Unsatisfied — ${corrections.length} correction(s) for the Worker:`);
+    corrections.forEach((c, i) => trace('master', 'reasoning', `${i + 1}. ${typeof c === 'string' ? c : (c.summary || JSON.stringify(c))}`));
 
     // Worker applies the Master's corrections (no rebuild).
+    trace('worker', 'action', `Applying ${corrections.length} Master correction(s)`);
     await runRole('carpenter', {
       spec_path: 'SPEC.md', master_corrections: corrections,
       attempt: payload.attempt, supervision_round: s,
@@ -743,7 +957,9 @@ async function runCarpenterSwarm(payload) {
 async function main() {
   const state = preflight();
   state.attemptHistory = [];
+  try { fs.writeFileSync(TRACE_PATH, ''); } catch {} // fresh trace per run for the dashboard
   setStatus('starting', { branch: state.branch, maxRounds: CONFIG.maxRounds });
+  trace('orchestrator', 'note', `Starting swarm on ${state.branch} (base ${state.baseBranch})`);
 
   let failedFindings = [];           // High-only, fed back to Carpenter (Reviewer->Carpenter edge)
 
@@ -769,6 +985,9 @@ async function main() {
 
     // 1b) Orchestrator commits the Carpenter's work; derive the TRUE diff (bug #2 fix).
     const commit = carpenterCommit(attempt, preHead);
+    if (commit.changed) {
+      trace('worker', 'result', `Committed ${commit.files.length} file(s):\n` + commit.files.map((f) => '  • ' + f).join('\n'));
+    }
     if (!commit.changed) {
       // No-op Carpenter must NOT reach a false clean pass. Skip the Reviewer (save
       // tokens), record a synthetic High, and let the breaker handle it.
@@ -804,6 +1023,8 @@ async function main() {
     });
 
     const { high, lowMed } = splitBySeverity(review.findings);
+    trace('reviewer', 'verdict', high.length === 0 ? 'PASS — no blocking findings' : `FAIL — ${high.length} High finding(s)`);
+    [...high, ...lowMed].forEach((f) => trace('reviewer', 'reasoning', `[${f.severity}] ${f.file}:${f.line} — ${f.summary}`));
     appendBacklog(lowMed, attempt);                         // ADR-0002: Medium/Low -> BACKLOG.md
     state.attemptHistory.push({ round: attempt,
       fix_attempted: commit.files,
@@ -814,7 +1035,14 @@ async function main() {
     if (high.length === 0) {
       setStatus('clean-pass', { round: attempt });
       log(`CLEAN PASS on round ${attempt} (tokens ~${tokensUsed}). Halt & Leave — not auto-merged.`);
+      trace('orchestrator', 'verdict', `CLEAN PASS on round ${attempt} — ready for your review`);
+      const summary = await generateSummary(state); // the plain-English "answer" (best-effort)
+      printImplementationSummary(summary);
       printMergeSummary(state);
+      writeResult({ ok: true, branch: state.branch, baseBranch: state.baseBranch,
+        round: attempt, files: commit.files, summary: summary || '',
+        merge_command: `git checkout ${state.baseBranch} && git merge ${state.branch}`,
+        ts: new Date().toISOString() });
       process.exit(0);
     }
 
