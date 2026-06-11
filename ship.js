@@ -70,11 +70,11 @@ const CONFIG = {
   // DeepSeek, so it shares the exact same args as real `claude`.
   engines: {
     // carpenter == the Worker Carpenter (ADR-0008): cheap bulk builder.
-    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'fcc-claude', args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions'] },
+    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'fcc-claude', args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
     // master == the Master Carpenter (ADR-0008): Claude foreman. Same headless
     // claude flags as a Worker, but it inspects (read-only judgment) instead of
     // building. Claude emits a `usage` envelope, so its calls un-blind the budget.
-    master:    { cmd: process.env.SHIP_MASTER_CMD     || 'claude', args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions'] },
+    master:    { cmd: process.env.SHIP_MASTER_CMD     || 'claude', args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
     reviewer:  { cmd: process.env.SHIP_REVIEWER_CMD  || 'codex', args: ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', '-o', '__OUTFILE__', '-'], outputFile: true },
   },
 };
