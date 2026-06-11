@@ -45,3 +45,12 @@ offered as a one-line override (`SHIP_CARPENTER_CMD=claude`).
 - A future reader wondering "why does a public tool default to a third-party free
   proxy instead of the `claude` the user already has?" has the answer here: cheap
   building is the point, and the override is one env var away.
+- **Fail-fast guard, not silent failure.** Because the default depends on a router
+  that a newcomer (or even the author) may not have running, `preflight()` calls
+  `assertCarpenterReady()`: it verifies the Carpenter command resolves on PATH and —
+  for `fcc-claude` — that the router answers on `:8082`, halting at **zero token
+  cost** with the exact `SHIP_CARPENTER_CMD=claude` retry line if not. This keeps the
+  cost-driven default from becoming a hostile first-run: a misconfigured engine stops
+  instantly instead of burning all three rounds into a confusing escalation. The
+  README's "Try it in 60 seconds" leads with the same `claude` override so a curious
+  stranger gets a green run before standing up the router.

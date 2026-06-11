@@ -560,7 +560,7 @@ function ensureFccServer() {
     process.execPath, ['-e', probe], { timeout: 1500 }
   ).status === 0;
 
-  if (isUp()) { log('preflight: fcc-server already running at :8082'); return; }
+  if (isUp()) { log('preflight: fcc-server already running at :8082'); return true; }
 
   log('preflight: fcc-server not detected — starting fcc-server in background...');
   const srv = require('node:child_process').spawn('fcc-server', [], {
@@ -573,8 +573,51 @@ function ensureFccServer() {
   while (Date.now() < deadline) {
     if (isUp()) { ready = true; break; }
   }
-  if (ready) log('preflight: fcc-server started and ready at :8082');
-  else warn('fcc-server did not become ready within 10 s — Carpenter may fail; proceeding anyway');
+  if (ready) { log('preflight: fcc-server started and ready at :8082'); return true; }
+  return false; // caller (assertCarpenterReady) decides — we fail FAST, never "proceed anyway"
+}
+
+// Does the Worker Carpenter route through the fcc proxy router?
+function carpenterUsesFcc() { return /fcc/i.test(CONFIG.engines.carpenter.cmd); }
+
+// Resolve a command on PATH WITHOUT executing it (no tokens, no side effects).
+function commandOnPath(cmd) {
+  const probe = process.platform === 'win32' ? `where ${cmd}` : `command -v ${cmd}`;
+  try {
+    const r = require('node:child_process').spawnSync(probe, { shell: true, encoding: 'utf8', timeout: 4000 });
+    return r.status === 0 && String(r.stdout).trim().length > 0;
+  } catch { return false; }
+}
+
+// Carpenter engine readiness — fail FAST (zero tokens) instead of letting a
+// missing/unready engine burn all 3 rounds into a confusing escalation. The
+// default engine (fcc-claude) depends on a third-party router + DeepSeek key;
+// the always-available escape hatch is the standard `claude` CLI the user already
+// has authenticated for Claude Code (ADR-0009: claude is the documented override).
+function assertCarpenterReady() {
+  const cmd = CONFIG.engines.carpenter.cmd;
+  const escapeHatch = '  Fastest fix — build with Claude (zero extra setup):\n'
+    + (process.platform === 'win32'
+        ? "      $env:SHIP_CARPENTER_CMD='claude'; ship\n"
+        : '      SHIP_CARPENTER_CMD=claude ship\n');
+
+  if (!commandOnPath(cmd)) {
+    fail(`Carpenter engine '${cmd}' is not on your PATH.\n`
+      + escapeHatch
+      + (carpenterUsesFcc() ? '  Or install the router:   ./setup.ps1   (README → Install)\n' : '')
+      + '  (halted before spending any tokens)');
+  }
+
+  // fcc-claude is a proxy CLIENT — if the router is down, builds silently produce
+  // nothing and carpenterCommit sees a false/empty diff. Refuse to start.
+  if (carpenterUsesFcc() && !ensureFccServer()) {
+    fail('Carpenter engine \'fcc-claude\' is installed, but the fcc-server router is not '
+      + 'reachable at http://127.0.0.1:8082 — builds would silently produce nothing.\n'
+      + escapeHatch
+      + '  Or start + configure the router:\n'
+      + '      fcc-server   then open http://127.0.0.1:8082/admin and paste your DeepSeek key\n'
+      + '  (halted before spending any tokens)');
+  }
 }
 
 // Preflight — Q7 decision (single /ship trigger, fully-automatic fail-fast gate,
@@ -657,9 +700,10 @@ function preflight() {
   }
   log(`preflight: on work branch ${branch} (base: ${baseBranch})`);
 
-  // 2.5. Ensure fcc-server is reachable at :8082 — auto-start if not.
-  //      fcc-claude is a proxy client; it cannot connect without the server running.
-  ensureFccServer();
+  // 2.5. Carpenter engine readiness — fail FAST here (zero tokens) if the chosen
+  //      engine is missing, or (for fcc-claude) if the router isn't reachable.
+  //      Only touches fcc-server when the Carpenter actually uses it.
+  assertCarpenterReady();
 
   // 3. Graph update — best-effort; non-fatal (mirrors refreshGraph() mid-loop).
   //    A missing API key or uninstalled graphify degrades Reviewer accuracy but

@@ -30,6 +30,33 @@ You (Architect)
 
 ---
 
+## Try it in 60 seconds (no extra accounts)
+
+The full setup wires up DeepSeek + Codex for the cheapest, most rigorous loop. But if
+you just want to **see it run right now**, build with the `claude` CLI you already have
+authenticated for Claude Code — zero extra keys, zero router:
+
+```powershell
+git clone https://github.com/Cappe6969/Architect-Builder-Reviewer.git
+cd Architect-Builder-Reviewer
+npm link                                   # puts `ship` on your PATH
+
+cd path\to\any-git-project                 # a repo with at least one commit
+ship-init                                  # writes a SPEC.md stub + workflow files
+# edit SPEC.md — describe one concrete change
+
+$env:SHIP_CARPENTER_CMD = 'claude'         # build with Claude (no DeepSeek/router needed)
+$env:SHIP_REVIEWER_CMD  = 'claude'         # review with Claude too (skip Codex for now)
+ship
+```
+
+That's a complete Architect → Carpenter → Reviewer run on Claude alone. When you're
+ready for the cheaper, independent-reviewer setup, do the [full install](#install)
+below and drop the two env vars. (`ship` **fails fast with this exact command** if the
+default DeepSeek engine isn't set up — it never burns tokens on a misconfigured run.)
+
+---
+
 ## What you need (and what each thing costs)
 
 This tool orchestrates **three** AI engines. You bring credentials for two of them; the
@@ -241,8 +268,9 @@ of `ship.js`.
 | Symptom | Fix |
 |---------|-----|
 | `not a git repository` / `no commits yet` | `git init` and make one commit, or run `ship-init`. |
-| Carpenter produces no changes / silent fail | The fcc router isn't up. Run `fcc-server`, confirm `http://127.0.0.1:8082/admin` loads and the key is applied. |
-| `reviewer auth-401` | Run `codex login` again. |
+| `Carpenter engine '…' is not on your PATH` | Preflight halted before spending tokens. Either set up the engine, or build with Claude: `$env:SHIP_CARPENTER_CMD='claude'; ship`. |
+| `fcc-server router is not reachable` | Run `fcc-server`, confirm `http://127.0.0.1:8082/admin` loads and the DeepSeek key is applied — or use the Claude override above. |
+| `reviewer auth-401` | Run `codex login` again (or build/review with Claude via the env vars in [Try it in 60 seconds](#try-it-in-60-seconds-no-extra-accounts)). |
 | `work branch … already has N unmerged commit(s)` | Merge it, or re-run with `--fresh` (discards the branch's commits, never your working tree). |
 | Everything green but unsure engines really work | `node calibrate.js` (spends a few tokens to verify end to end). |
 
