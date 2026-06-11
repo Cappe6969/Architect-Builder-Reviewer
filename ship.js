@@ -52,6 +52,17 @@ const RESULT_PATH = path.join(process.cwd(), '.ship-result.json'); // terminal-s
 const TRACE_PATH  = path.join(process.cwd(), '.ship-trace.jsonl');  // append-only per-agent event log read by ship-ui
 const TRACE_STREAM = !!process.env.SHIP_TRACE; // opt-in (set by ship-ui): stream token-level reasoning, not just milestones
 
+// Worker Carpenter "ultracode" tuning (ADR-0010). `ultracode` is NOT a valid
+// --effort value (the CLI accepts low|medium|high|xhigh|max); it is a MODE =
+// xhigh effort + dynamic-workflow orchestration. We force the safe, deterministic
+// HALF — the effort tier — on the DeepSeek Worker only (SHIP_CARPENTER_EFFORT,
+// default 'xhigh'; set '' to disable). The workflow-orchestration half is opt-in
+// (SHIP_CARPENTER_WORKFLOW=1) because dynamic workflows spawn sub-agents that can
+// break the single-JSON {status,changed_files} result envelope the loop relies on.
+const CARPENTER_EFFORT   = process.env.SHIP_CARPENTER_EFFORT ?? 'xhigh';
+const CARPENTER_WORKFLOW = process.env.SHIP_CARPENTER_WORKFLOW === '1';
+const carpenterEffortArgs = CARPENTER_EFFORT ? ['--effort', CARPENTER_EFFORT] : [];
+
 const CONFIG = {
   specPath:      path.join(ROOT, 'SPEC.md'),
   backlogPath:   path.join(ROOT, 'BACKLOG.md'),
@@ -73,7 +84,7 @@ const CONFIG = {
   // DeepSeek, so it shares the exact same args as real `claude`.
   engines: {
     // carpenter == the Worker Carpenter (ADR-0008): cheap bulk builder.
-    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'fcc-claude', args: ['-p', '--output-format', 'json', '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
+    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'fcc-claude', args: ['-p', '--output-format', 'json', ...carpenterEffortArgs, '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
     // master == the Master Carpenter (ADR-0008): Claude foreman. Same headless
     // claude flags as a Worker, but it inspects (read-only judgment) instead of
     // building. Claude emits a `usage` envelope, so its calls un-blind the budget.
@@ -466,6 +477,11 @@ function buildPrompt(role, payload) {
       task = 'Build EXACTLY what the Spec says, from scratch.';
     }
     return [
+      // Opt-in (SHIP_CARPENTER_WORKFLOW=1): the dynamic-workflow trigger keyword.
+      // Including it asks the harness to run this build as an orchestrated workflow
+      // (the "workflow" half of ultracode). Off by default — it can spawn sub-agents
+      // that alter the JSON result envelope the loop parses.
+      ...(CARPENTER_WORKFLOW ? ['ultracode', ''] : []),
       'You are the WORKER CARPENTER. Make no design decisions.',
       task,
       'Re-read the Spec (SPEC.md) from disk now; it is the sole source of truth.',
@@ -1107,6 +1123,8 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
     'Usage: write SPEC.md at the repo root, then run `ship` (or `node ship.js`).',
     'Flags:  --fresh   discard a prior swarm branch for this Spec (refuses if tracked files are dirty)',
     'Env:    SHIP_CARPENTER_CMD / SHIP_MASTER_CMD / SHIP_REVIEWER_CMD   override engines (ADR-0004/0008)',
+    '        SHIP_CARPENTER_EFFORT   Worker effort: low|medium|high|xhigh|max (default xhigh; "" disables) (ADR-0010)',
+    '        SHIP_CARPENTER_WORKFLOW=1   opt into dynamic-workflow orchestration on the Worker (may alter result shape)',
     '        SHIP_TOKEN_BUDGET   token cap across all rounds (default 2,000,000)',
   ].join('\n'));
   process.exit(0);

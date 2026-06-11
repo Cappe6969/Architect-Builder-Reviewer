@@ -212,7 +212,7 @@ lib/parse.js       — shared defensive JSON parsing (shape-validated)
 docs/
   WORKFLOW.md      — full expert workflow guide
   CONTEXT.md       — canonical glossary of all roles/terms
-  adr/             — Architecture Decision Records (ADR-0001 → ADR-0009)
+  adr/             — Architecture Decision Records (ADR-0001 → ADR-0010)
 .claude/skills/ship/SKILL.md  — the /ship Claude Code skill
 .env.example       — optional, NON-SECRET tuning knobs
 ```
@@ -246,6 +246,7 @@ Full log in [`docs/adr/`](docs/adr/). Highlights:
 - **ADR-0006** — Halt & Leave merge policy (never auto-merge)
 - **ADR-0008** — the Carpenter sub-swarm (Worker + Master foreman)
 - **ADR-0009** — why the public default Carpenter stays DeepSeek
+- **ADR-0010** — Worker effort (`xhigh`) + the gated `ultracode` workflow half
 
 ---
 
@@ -257,6 +258,15 @@ Full log in [`docs/adr/`](docs/adr/). Highlights:
 | `SHIP_CARPENTER_CMD` | `fcc-claude` | Worker Carpenter engine |
 | `SHIP_MASTER_CMD` | `claude` | Master Carpenter (foreman) engine |
 | `SHIP_REVIEWER_CMD` | `codex` | Reviewer engine |
+| `SHIP_CARPENTER_EFFORT` | `xhigh` | Worker effort tier: `low\|medium\|high\|xhigh\|max`; `""` disables ([ADR-0010](docs/adr/0010-carpenter-effort-and-workflow.md)) |
+| `SHIP_CARPENTER_WORKFLOW` | _(unset)_ | `1` opts the Worker into dynamic-workflow orchestration (the "workflow" half of `ultracode`) — **may alter the JSON result shape** |
+
+> **About `ultracode`:** Claude Code's `ultracode` mode is *xhigh effort + dynamic-workflow
+> orchestration* — it isn't a single headless flag (`--effort` only accepts
+> `low/medium/high/xhigh/max`). The Worker Carpenter runs at **`xhigh`** by default to
+> capture the effort half safely; the orchestration half is opt-in via
+> `SHIP_CARPENTER_WORKFLOW=1` because dynamic sub-agents can break the loop's
+> single-JSON result contract. Master and Reviewer are unaffected.
 
 Timeouts (`carpenterMs`, `reviewerMs`) and `maxRounds` live in `CONFIG` near the top
 of `ship.js`.
