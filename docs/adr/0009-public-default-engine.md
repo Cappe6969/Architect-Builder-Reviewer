@@ -1,6 +1,8 @@
 # Public release keeps fcc-claude/DeepSeek as the default Carpenter
 
-**Status:** accepted
+**Status:** superseded by [ADR-0012](0012-deepseek-direct-no-fcc-router.md) — the default
+Carpenter is now `claude` pointed at DeepSeek's Anthropic endpoint directly, removing the
+free-claude-code install this ADR had accepted. The reasoning below is kept for history.
 
 ## Context & decision
 

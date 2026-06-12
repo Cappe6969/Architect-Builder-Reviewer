@@ -1,9 +1,10 @@
 # Architect · Carpenter · Reviewer
 
 An automated, self-contained build loop for [Claude Code](https://claude.com/claude-code).
-Write a `SPEC.md`. Type `/ship`. A **Carpenter** (DeepSeek V4) builds it; a **Reviewer**
-(OpenAI Codex) audits the diff; the loop retries until zero High findings or 3 rounds —
-then stops and hands the branch back to you. It **never auto-merges**.
+Write a `SPEC.md`. Type `/ship`. A **Carpenter** (`claude` routed to DeepSeek — no router
+to install) builds it; a **Reviewer** (OpenAI Codex) audits the diff; the loop retries
+until zero High findings or 3 rounds — then stops and hands the branch back to you. It
+**never auto-merges**.
 
 ```
 You (Architect)
@@ -12,7 +13,7 @@ You (Architect)
   /ship ──► Preflight (branch, lock, graph)
               │
               ▼
-        ┌─ Carpenter (DeepSeek/fcc-claude) ─builds─► commit
+        ┌─ Carpenter (claude → DeepSeek) ─builds─► commit
         │         ▲
         │    High findings only
         │         │
@@ -30,74 +31,60 @@ You (Architect)
 
 ---
 
-## Try it in 60 seconds (no extra accounts)
+## Try it in 60 seconds
 
-The full setup wires up DeepSeek + Codex for the cheapest, most rigorous loop. But if
-you just want to **see it run right now**, build with the `claude` CLI you already have
-authenticated for Claude Code — zero extra keys, zero router:
+No third-party router to install. The Carpenter is the `claude` you already have:
 
 ```powershell
 git clone https://github.com/Cappe6969/Architect-Builder-Reviewer.git
 cd Architect-Builder-Reviewer
-npm link                                   # puts `ship` on your PATH
+npm link                                   # puts ship / ship-app / ship-init on your PATH
 
 cd path\to\any-git-project                 # a repo with at least one commit
-ship-init                                  # writes a SPEC.md stub + workflow files
-# edit SPEC.md — describe one concrete change
+ship-init                                  # scaffolds the workflow + a ship-app.cmd launcher
 
-$env:SHIP_CARPENTER_CMD = 'claude'         # build with Claude (no DeepSeek/router needed)
-$env:SHIP_REVIEWER_CMD  = 'claude'         # review with Claude too (skip Codex for now)
-ship
+# (optional) cheap DeepSeek builds — still no router, just a key:
+$env:DEEPSEEK_API_KEY = '<your-deepseek-key>'
+
+ship-app                                   # chat with the Architect, then press Ship it
 ```
 
-That's a complete Architect → Carpenter → Reviewer run on Claude alone. When you're
-ready for the cheaper, independent-reviewer setup, do the [full install](#install)
-below and drop the two env vars. (`ship` **fails fast with this exact command** if the
-default DeepSeek engine isn't set up — it never burns tokens on a misconfigured run.)
+No DeepSeek key? It still runs — the Carpenter just builds on Anthropic Claude (costlier).
+The only hard requirement is **Claude Code** (you have it) plus **Codex** for review
+(or review with Claude too via `SHIP_REVIEWER_CMD=claude`).
 
 ---
 
 ## What you need (and what each thing costs)
 
-This tool orchestrates **three** AI engines. You bring credentials for two of them; the
-third is Claude Code itself, which you already have.
-
 | Role | Engine | You provide | Cost |
 |------|--------|-------------|------|
-| **Architect** (you) | Claude Code | already installed | your existing plan |
-| **Carpenter** (builds) | DeepSeek V4 via the [`free-claude-code`](https://github.com/Alishahryar1/free-claude-code) router (`fcc-claude`) | a **DeepSeek API key** | ~cents; pay-as-you-go |
-| **Reviewer** (audits) | OpenAI **Codex** CLI (`codex exec`) | **`codex login`** (ChatGPT plan) or `OPENAI_API_KEY` | your ChatGPT/OpenAI plan |
-| Graph (optional) | `graphify` via `uv` | *(reuses the DeepSeek key)* | optional |
+| **Architect** (you) | Claude Code (`claude`) | already installed | your existing plan |
+| **Carpenter** (builds) | `claude` → **DeepSeek endpoint** (default) | a DeepSeek key *(optional)* | ~cents on DeepSeek, or your Claude plan if no key |
+| **Reviewer** (audits) | OpenAI **Codex** (`codex exec`) | `codex login` or `OPENAI_API_KEY` | your ChatGPT/OpenAI plan |
+| Graph (optional) | `graphify` via `uv` | *reuses the DeepSeek key* | optional |
 
-Don't want the DeepSeek router? You can build with Claude instead in one env var —
-see [Swapping engines](#swapping-engines). The default is DeepSeek for cost reasons
-([ADR-0009](docs/adr/0009-public-default-engine.md)).
+**No free-claude-code router.** The Carpenter is the `claude` you already have, pointed at
+DeepSeek's official [Anthropic-compatible endpoint](https://api-docs.deepseek.com/guides/anthropic_api)
+via env vars ([ADR-0012](docs/adr/0012-deepseek-direct-no-fcc-router.md)): set
+`DEEPSEEK_API_KEY` for cheap DeepSeek builds (claude-opus → deepseek-v4-pro), or omit it to
+build on Anthropic Claude. The legacy router is still an opt-in
+(`SHIP_CARPENTER_CMD=fcc-claude`) — see [Optional: the legacy fcc router](#optional-the-legacy-fcc-router).
 
 ---
 
 ## Where your API keys go
 
-**Keys never go in this repo.** Each engine owns its own credential store:
+**Keys never go in this repo.**
 
-1. **DeepSeek key → the fcc-server admin UI (paste once).**
-   Get a key at [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys)
-   (add a small balance). Then:
-   ```powershell
-   fcc-server                       # starts the local router on :8082
-   ```
-   Open **http://127.0.0.1:8082/admin**, paste the key, set the model to
-   `deepseek/deepseek-v4-pro`, then **Validate + Apply**. The router persists it to
-   `~/.fcc/.env` — which `ship.js` also reads so the optional `graphify` step can
-   authenticate. **One paste covers both.**
+1. **DeepSeek key** *(optional — only for cheap builds)* → set **`DEEPSEEK_API_KEY`** as an
+   environment variable, or in a gitignored `.env`, or in `~/.fcc/.env` (read as a legacy
+   home). Get one at [platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys)
+   (add a small balance). The orchestrator points the Carpenter's `claude` at DeepSeek for you.
+2. **OpenAI/Codex** → `codex login` (browser OAuth) or set `OPENAI_API_KEY`.
 
-2. **OpenAI/Codex → `codex login`.**
-   ```powershell
-   codex login                      # browser OAuth (paid ChatGPT plan)
-   # — or — set OPENAI_API_KEY in your environment instead
-   ```
-
-That's it. There is **no project `.env` for secrets**. `.env.example` exists only for
-optional, non-secret tuning knobs (token budget, engine overrides).
+`.env` is gitignored; `.env.example` documents the non-secret knobs plus where the DeepSeek
+key goes.
 
 ---
 
@@ -111,18 +98,18 @@ cd Architect-Builder-Reviewer
 ./setup.ps1
 ```
 
-`setup.ps1` installs/verifies everything it can (Node ≥ 22, `uv` + `graphify`, the
-Codex CLI, the fcc router), links `ship` + `ship-init` onto your PATH, runs the two
-interactive logins, and ends with a **doctor** that functionally probes each engine
-(not just "is it on PATH"). Re-runnable. Verify any time with:
+`setup.ps1` installs/verifies what it can (Node ≥ 22, `uv` + `graphify`, the Codex CLI),
+links `ship` / `ship-app` / `ship-init` onto your PATH, runs `codex login`, and ends with
+a **doctor** that functionally probes each engine (not just "is it on PATH"). Re-runnable.
+Verify any time with:
 
 ```powershell
 ./setup.ps1 -DoctorOnly
 ```
 
-Two steps stay manual (they need a browser / a key you own) — the doctor reminds you:
-- paste the **DeepSeek key** in the fcc admin UI (above), and
-- run **`codex login`**.
+Manual steps the doctor reminds you of:
+- run **`codex login`** (the Reviewer), and
+- *(optional, for cheap builds)* set **`DEEPSEEK_API_KEY`** in your environment.
 
 For a live, token-spending check of the engines end to end: `node calibrate.js`.
 
@@ -133,20 +120,25 @@ do the equivalents by hand:
 
 ```bash
 # 1. Node ≥ 22  (codex requires it)            https://nodejs.org
-# 2. Codex CLI
+# 2. Claude Code (the Architect + default Carpenter)   https://claude.com/claude-code
+# 3. Codex CLI (the Reviewer)
 npm install -g @openai/codex && codex login
-# 3. graphify (optional, for graph-aware review)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv tool install graphifyy && graphify install
-# 4. fcc router (the Carpenter) — see its repo for *nix install:
-#    https://github.com/Alishahryar1/free-claude-code
-#    then `fcc-server`, paste the DeepSeek key at http://127.0.0.1:8082/admin
-# 5. Link the CLIs
-npm link        # from the repo root → puts `ship` / `ship-init` on PATH
+# 4. (optional) cheap DeepSeek builds — no router, just a key:
+export DEEPSEEK_API_KEY=<your-deepseek-key>
+# 5. (optional) graphify for graph-aware review
+curl -LsSf https://astral.sh/uv/install.sh | sh && uv tool install graphifyy && graphify install
+# 6. Link the CLIs
+npm link        # from the repo root → puts ship / ship-app / ship-init on PATH
 ```
 
-Prefer not to run the fcc router on `*nix`? Build with Claude instead:
-`export SHIP_CARPENTER_CMD=claude` (see [Swapping engines](#swapping-engines)).
+No fcc router required on any platform — the Carpenter routes `claude` straight to DeepSeek.
+
+### Optional: the legacy fcc router
+
+Already running [free-claude-code](https://github.com/Alishahryar1/free-claude-code), or
+want to route the Carpenter through it (e.g. to reach a provider DeepSeek's endpoint
+doesn't)? Set `SHIP_CARPENTER_CMD=fcc-claude` and start `fcc-server`; the orchestrator's
+preflight will manage the `:8082` router as before. Not needed for the default path.
 
 ---
 
@@ -193,9 +185,9 @@ Every role is a headless CLI behind the `runRole` seam ([ADR-0004](docs/adr/0004
 overridable by env var with **no code edit**:
 
 ```powershell
-$env:SHIP_CARPENTER_CMD = 'claude'   # build with Claude instead of DeepSeek/fcc
-$env:SHIP_MASTER_CMD    = 'claude'   # the foreman (default: claude)
-$env:SHIP_REVIEWER_CMD  = 'codex'    # the auditor (default: codex)
+$env:SHIP_CARPENTER_CMD = 'fcc-claude'  # use the legacy router instead of claude→DeepSeek
+$env:SHIP_MASTER_CMD    = 'claude'      # the foreman (default: claude)
+$env:SHIP_REVIEWER_CMD  = 'codex'       # the auditor (default: codex)
 ```
 
 Setting `SHIP_CARPENTER_CMD=claude` lets you skip the fcc router and DeepSeek entirely —
@@ -233,8 +225,9 @@ docs/
 - **Architect** — you (+ Claude Code in plan mode). Writes `SPEC.md`. Never edits
   Carpenter output directly — fixes go through `SPEC.md`.
 - **Carpenter** — a sub-swarm ([ADR-0008](docs/adr/0008-carpenter-sub-swarm.md)): a
-  cheap **Worker** (`fcc-claude`/DeepSeek) builds; a **Master** (`claude`) foreman
-  inspects for completeness + conciseness only. Makes no correctness calls.
+  cheap **Worker** (`claude` routed to DeepSeek, [ADR-0012](docs/adr/0012-deepseek-direct-no-fcc-router.md))
+  builds; a **Master** (`claude`, Anthropic) foreman inspects for completeness +
+  conciseness only. Makes no correctness calls.
 - **Reviewer** — `codex exec`, headless, read-only. Returns JSON findings classified
   `High / Medium / Low`.
 
@@ -253,9 +246,9 @@ Full log in [`docs/adr/`](docs/adr/). Highlights:
 - **ADR-0004** — cross-model routing via headless CLI (the `runRole` seam)
 - **ADR-0006** — Halt & Leave merge policy (never auto-merge)
 - **ADR-0008** — the Carpenter sub-swarm (Worker + Master foreman)
-- **ADR-0009** — why the public default Carpenter stays DeepSeek
 - **ADR-0010** — Worker effort (`xhigh`) + the gated `ultracode` workflow half
 - **ADR-0011** — the Architect chat-app + UI-from-handoff routing
+- **ADR-0012** — `claude`→DeepSeek direct; drop the free-claude-code install (supersedes ADR-0009)
 
 ---
 
@@ -264,7 +257,9 @@ Full log in [`docs/adr/`](docs/adr/). Highlights:
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `SHIP_TOKEN_BUDGET` | `2000000` | token cap across all rounds |
-| `SHIP_CARPENTER_CMD` | `fcc-claude` | Worker Carpenter engine |
+| `DEEPSEEK_API_KEY` | _(unset)_ | routes the default `claude` Carpenter to DeepSeek (cheap, no router); unset = build on Anthropic Claude ([ADR-0012](docs/adr/0012-deepseek-direct-no-fcc-router.md)) |
+| `SHIP_CARPENTER_CMD` | `claude` | Worker Carpenter engine (`fcc-claude` for the legacy router) |
+| `SHIP_DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | DeepSeek Anthropic endpoint the Carpenter points at |
 | `SHIP_MASTER_CMD` | `claude` | Master Carpenter (foreman) engine |
 | `SHIP_REVIEWER_CMD` | `codex` | Reviewer engine |
 | `SHIP_CARPENTER_EFFORT` | `xhigh` | Worker effort tier: `low\|medium\|high\|xhigh\|max`; `""` disables ([ADR-0010](docs/adr/0010-carpenter-effort-and-workflow.md)) |

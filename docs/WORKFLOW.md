@@ -73,7 +73,15 @@ There is **no manual copy-paste between terminals.** The Architect writes `SPEC.
 
 ---
 
-## 2. Setup — Part 1: The DeepSeek Carpenter (`free-claude-code`)
+## 2. Setup — Part 1: The DeepSeek Carpenter
+
+> **Updated (ADR-0012):** the **default** Carpenter no longer uses the `free-claude-code`
+> router. It runs the `claude` you already have, pointed at **DeepSeek's own
+> Anthropic-compatible endpoint** (`https://api.deepseek.com/anthropic`) via env vars —
+> just set `DEEPSEEK_API_KEY` (no `:8082` proxy, no admin UI). Omit the key and the
+> Carpenter builds on Anthropic Claude. **The fcc-router setup below is now the OPTIONAL
+> legacy path** (`SHIP_CARPENTER_CMD=fcc-claude`) — useful only if you already run the
+> router or need it to reach a provider DeepSeek's endpoint doesn't.
 
 A local proxy (port **8082**) intercepts the Anthropic API and reroutes Claude Code to DeepSeek, so the whole harness works unchanged on a cheaper brain. Repo: **https://github.com/Alishahryar1/free-claude-code**
 

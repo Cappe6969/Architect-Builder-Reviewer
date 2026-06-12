@@ -30,9 +30,12 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const { defensiveJsonParse, extractUsageTokens, extractBody } = require('./lib/parse'); // shared contract (ADR-0002)
 
-// Load DEEPSEEK_API_KEY from ~/.fcc/.env so graphify can authenticate without
-// requiring a Windows env var (which would also lock out the fcc-server Admin UI).
-(function loadFccKey() {
+// Load DEEPSEEK_API_KEY from ~/.fcc/.env if not already in the environment. The key
+// feeds two things: the default Carpenter's DeepSeek routing (ADR-0012) and graphify's
+// semantic extraction. (~/.fcc/.env is a convenient legacy home for the key; a plain
+// DEEPSEEK_API_KEY env var or a gitignored .env works just as well now that the default
+// Carpenter no longer needs the fcc router.)
+(function loadDeepseekKey() {
   if (process.env.DEEPSEEK_API_KEY) return;
   try {
     const fccEnv = path.join(os.homedir(), '.fcc', '.env');
@@ -70,6 +73,21 @@ const carpenterEffortArgs = CARPENTER_EFFORT ? ['--effort', CARPENTER_EFFORT] : 
 // catches any leak. Adds the keyword via SHIP_CARPENTER_WORKFLOW handled in buildPrompt.
 const carpenterWorkflowArgs = CARPENTER_WORKFLOW ? ['--disallowedTools', 'EnterWorktree', 'ExitWorktree'] : [];
 
+// Carpenter engine routing (ADR-0012). The DEFAULT Worker is the `claude` agent the
+// user ALREADY has, pointed at DeepSeek's Anthropic-compatible endpoint via env vars —
+// cheap DeepSeek builds with NO free-claude-code router to install. Needs only a
+// DeepSeek key (DEEPSEEK_API_KEY, loaded above; claude-opus maps to deepseek-v4-pro).
+// Injected ONLY on the default path (no SHIP_CARPENTER_CMD override) and only when a
+// key exists; otherwise the Carpenter runs as plain Anthropic Claude so the loop still
+// works (costlier). Legacy: SHIP_CARPENTER_CMD=fcc-claude still drives the old router.
+const carpenterEnv = (!process.env.SHIP_CARPENTER_CMD && process.env.DEEPSEEK_API_KEY)
+  ? {
+      ANTHROPIC_BASE_URL:   process.env.SHIP_DEEPSEEK_BASE_URL || 'https://api.deepseek.com/anthropic',
+      ANTHROPIC_API_KEY:    process.env.DEEPSEEK_API_KEY,
+      ANTHROPIC_AUTH_TOKEN: process.env.DEEPSEEK_API_KEY,
+    }
+  : {};
+
 const CONFIG = {
   specPath:      path.join(ROOT, 'SPEC.md'),
   backlogPath:   path.join(ROOT, 'BACKLOG.md'),
@@ -86,12 +104,13 @@ const CONFIG = {
   // keeps it read-only; -o writes the final message to a file (pending one clean
   // `node calibrate.js` to confirm -o on this version). Carpenter still CALIBRATE.
   // Each engine command can be overridden from the environment so the runRole
-  // seam (ADR-0004) is swappable WITHOUT a code edit — e.g. SHIP_CARPENTER_CMD=claude
-  // isolates the loop from a flaky router. fcc-claude is Claude Code pointed at
-  // DeepSeek, so it shares the exact same args as real `claude`.
+  // seam (ADR-0004) is swappable WITHOUT a code edit. The DEFAULT Carpenter is
+  // `claude` routed at DeepSeek via carpenterEnv (ADR-0012) — no fcc router needed;
+  // SHIP_CARPENTER_CMD=fcc-claude restores the legacy router path.
   engines: {
-    // carpenter == the Worker Carpenter (ADR-0008): cheap bulk builder.
-    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'fcc-claude', args: ['-p', '--output-format', 'json', ...carpenterEffortArgs, ...carpenterWorkflowArgs, '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
+    // carpenter == the Worker Carpenter (ADR-0008): cheap bulk builder. Default
+    // `claude` + DeepSeek endpoint (carpenterEnv); see ADR-0012.
+    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'claude', env: carpenterEnv, args: ['-p', '--output-format', 'json', ...carpenterEffortArgs, ...carpenterWorkflowArgs, '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
     // master == the Master Carpenter (ADR-0008): Claude foreman. Same headless
     // claude flags as a Worker, but it inspects (read-only judgment) instead of
     // building. Claude emits a `usage` envelope, so its calls un-blind the budget.
@@ -144,7 +163,7 @@ function trace(agent, kind, text, extra = {}) {
  * A timeout rejects with code 'ETIMEDOUT' so callers can convert it into a
  * failed round rather than a crash (constraint #3).
  */
-function spawnCapture(cmd, args, input, timeoutMs, { passthroughStdout = false, onStdout = null } = {}) {
+function spawnCapture(cmd, args, input, timeoutMs, { passthroughStdout = false, onStdout = null, env = null } = {}) {
   return new Promise((resolve, reject) => {
     // `settled` + independent timeout: a missing/hanging engine (no 'close'
     // event, dead stdin pipe on Windows) must NEVER deadlock the orchestrator.
@@ -152,7 +171,7 @@ function spawnCapture(cmd, args, input, timeoutMs, { passthroughStdout = false, 
     const finish = (fn, val) => { if (settled) return; settled = true; clearTimeout(timer); fn(val); };
 
     let child;
-    try { child = spawn(cmd, args, { shell: process.platform === 'win32', cwd: ROOT }); }
+    try { child = spawn(cmd, args, { shell: process.platform === 'win32', cwd: ROOT, env: env ? { ...process.env, ...env } : process.env }); }
     catch (err) { return reject(err); }
 
     let stdout = '', stderr = '';
@@ -202,12 +221,12 @@ function streamArgs(args) {
 // EXISTING parse path (defensiveJsonParse → extractBody) is unchanged. Same
 // timeout/kill discipline as spawnCapture; any parse hiccup is swallowed (the
 // stream is cosmetic — only the result envelope matters for the loop).
-function spawnStream(cmd, args, input, timeoutMs, agent) {
+function spawnStream(cmd, args, input, timeoutMs, agent, env = null) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (fn, val) => { if (settled) return; settled = true; clearTimeout(timer); fn(val); };
     let child;
-    try { child = spawn(cmd, args, { shell: process.platform === 'win32', cwd: ROOT }); }
+    try { child = spawn(cmd, args, { shell: process.platform === 'win32', cwd: ROOT, env: env ? { ...process.env, ...env } : process.env }); }
     catch (err) { return reject(err); }
 
     let buf = '', stderr = '', resultEnvelope = null;
@@ -298,7 +317,7 @@ async function autoFixRoleError(role, err, prompt, timeoutMs) {
     if (isAuth) warn('  → to restore Codex run:  codex login');
     try {
       const carp = CONFIG.engines.carpenter;
-      const fb = await spawnCapture(carp.cmd, carp.args, prompt, timeoutMs, { passthroughStdout: true });
+      const fb = await spawnCapture(carp.cmd, carp.args, prompt, timeoutMs, { passthroughStdout: true, env: carp.env });
       warn('reviewer fallback succeeded; review result may differ from a dedicated Codex review');
       return { _raw: fb };
     } catch (fbErr) {
@@ -367,9 +386,9 @@ async function runRole(role, payload) {
   let raw;
   try {
     const stdout = streaming
-      ? await spawnStream(eng.cmd, streamArgs(args), prompt, timeoutMs, agent)
+      ? await spawnStream(eng.cmd, streamArgs(args), prompt, timeoutMs, agent, eng.env)
       : await spawnCapture(eng.cmd, args, prompt, timeoutMs,
-          { passthroughStdout: role === 'reviewer', onStdout: role === 'reviewer' ? reviewerTee : null });
+          { passthroughStdout: role === 'reviewer', onStdout: role === 'reviewer' ? reviewerTee : null, env: eng.env });
     if (eng.outputFile) {
       try { raw = fs.readFileSync(outFile, 'utf8'); }
       catch (readErr) {
@@ -436,7 +455,7 @@ async function runRole(role, payload) {
         CONFIG.engines.carpenter.cmd, CONFIG.engines.carpenter.args,
         `Convert the following text into the exact JSON schema for a ${role} response `
         + `(required keys: ${required}). Output ONLY raw JSON, no prose, no markdown fences.\n\n${raw}`,
-        CONFIG.timeouts.reviewerMs,
+        CONFIG.timeouts.reviewerMs, { env: CONFIG.engines.carpenter.env },
       );
       parsed = extractBody(defensiveJsonParse(coerced));
     } catch (coerceErr) {
@@ -613,34 +632,40 @@ function commandOnPath(cmd) {
 }
 
 // Carpenter engine readiness — fail FAST (zero tokens) instead of letting a
-// missing/unready engine burn all 3 rounds into a confusing escalation. The
-// default engine (fcc-claude) depends on a third-party router + DeepSeek key;
-// the always-available escape hatch is the standard `claude` CLI the user already
-// has authenticated for Claude Code (ADR-0009: claude is the documented override).
+// missing/unready engine burn all 3 rounds into a confusing escalation. The DEFAULT
+// Carpenter is `claude` (ADR-0012), which the user already has; it routes to DeepSeek
+// via env when DEEPSEEK_API_KEY is set, else runs as plain Anthropic Claude. fcc-claude
+// is supported only as an explicit legacy override (SHIP_CARPENTER_CMD=fcc-claude).
 function assertCarpenterReady() {
   const cmd = CONFIG.engines.carpenter.cmd;
-  const escapeHatch = '  Fastest fix — build with Claude (zero extra setup):\n'
-    + (process.platform === 'win32'
-        ? "      $env:SHIP_CARPENTER_CMD='claude'; ship\n"
-        : '      SHIP_CARPENTER_CMD=claude ship\n');
+  const isClaude = /(^|[\\/])claude(\.\w+)?$/i.test(cmd) || cmd === 'claude';
+  const routedToDeepseek = Boolean(CONFIG.engines.carpenter.env && CONFIG.engines.carpenter.env.ANTHROPIC_BASE_URL);
 
   if (!commandOnPath(cmd)) {
+    if (isClaude) {
+      fail("The default Carpenter engine 'claude' (Claude Code) is not on your PATH.\n"
+        + '  Install Claude Code:  https://claude.com/claude-code\n'
+        + '  Or point the Carpenter at another headless engine:  SHIP_CARPENTER_CMD=<cmd>\n'
+        + '  (halted before spending any tokens)');
+    }
     fail(`Carpenter engine '${cmd}' is not on your PATH.\n`
-      + escapeHatch
-      + (carpenterUsesFcc() ? '  Or install the router:   ./setup.ps1   (README → Install)\n' : '')
+      + '  Unset SHIP_CARPENTER_CMD to use the default (Claude Code, no install).\n'
+      + (carpenterUsesFcc() ? '  Or install the legacy router:  ./setup.ps1   (README → Optional: DeepSeek via fcc)\n' : '')
       + '  (halted before spending any tokens)');
   }
 
-  // fcc-claude is a proxy CLIENT — if the router is down, builds silently produce
-  // nothing and carpenterCommit sees a false/empty diff. Refuse to start.
+  // Legacy fcc path only: the router is a proxy CLIENT — if it's down, builds silently
+  // produce nothing and carpenterCommit sees a false/empty diff. Refuse to start.
   if (carpenterUsesFcc() && !ensureFccServer()) {
-    fail('Carpenter engine \'fcc-claude\' is installed, but the fcc-server router is not '
+    fail("Carpenter engine 'fcc-claude' is installed, but the fcc-server router is not "
       + 'reachable at http://127.0.0.1:8082 — builds would silently produce nothing.\n'
-      + escapeHatch
-      + '  Or start + configure the router:\n'
-      + '      fcc-server   then open http://127.0.0.1:8082/admin and paste your DeepSeek key\n'
+      + '  Drop the router entirely: unset SHIP_CARPENTER_CMD to use claude→DeepSeek directly (ADR-0012).\n'
+      + '  Or start it:  fcc-server   then open http://127.0.0.1:8082/admin\n'
       + '  (halted before spending any tokens)');
   }
+
+  if (isClaude && routedToDeepseek) log('preflight: Carpenter = claude → DeepSeek (no fcc router)');
+  else if (isClaude) log('preflight: Carpenter = claude (Anthropic; set DEEPSEEK_API_KEY for cheap DeepSeek builds)');
 }
 
 // Preflight — Q7 decision (single /ship trigger, fully-automatic fail-fast gate,
@@ -1157,7 +1182,8 @@ if (process.argv.includes('--help') || process.argv.includes('-h')) {
     'ship — Architect/Carpenter/Reviewer automated loop.',
     'Usage: write SPEC.md at the repo root, then run `ship` (or `node ship.js`).',
     'Flags:  --fresh   discard a prior swarm branch for this Spec (refuses if tracked files are dirty)',
-    'Env:    SHIP_CARPENTER_CMD / SHIP_MASTER_CMD / SHIP_REVIEWER_CMD   override engines (ADR-0004/0008)',
+    'Env:    DEEPSEEK_API_KEY   routes the default `claude` Carpenter to DeepSeek (cheap, no fcc) (ADR-0012)',
+    '        SHIP_CARPENTER_CMD / SHIP_MASTER_CMD / SHIP_REVIEWER_CMD   override engines (ADR-0004/0008)',
     '        SHIP_CARPENTER_EFFORT   Worker effort: low|medium|high|xhigh|max (default xhigh; "" disables) (ADR-0010)',
     '        SHIP_CARPENTER_WORKFLOW=1   opt into dynamic-workflow orchestration on the Worker (may alter result shape)',
     '        SHIP_TOKEN_BUDGET   token cap across all rounds (default 2,000,000)',

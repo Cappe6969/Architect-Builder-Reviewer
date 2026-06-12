@@ -87,18 +87,23 @@ if (Has codex) {
 } else { Warn "codex missing — run: npm install -g @openai/codex" }
 
 # ---------------------------------------------------------------------------
-# 4. fcc router  (the Carpenter — `fcc-claude -p`, DeepSeek behind a local proxy)
+# 4. Carpenter — claude -> DeepSeek direct (ADR-0012). The DEFAULT Carpenter is the
+#    `claude` you already have, pointed at DeepSeek's Anthropic endpoint via env vars.
+#    NO free-claude-code router to install. Set DEEPSEEK_API_KEY for cheap builds;
+#    without it the Carpenter builds on Anthropic Claude (still works, costlier).
 # ---------------------------------------------------------------------------
-Section "fcc router (Carpenter)"
-if (-not (Has fcc-claude) -and -not $DoctorOnly) {
-  Warn "installing free-claude-code router…"
-  try { irm "https://github.com/Alishahryar1/free-claude-code/blob/main/scripts/install.ps1?raw=1" | iex }
-  catch { Bad "router install failed: $($_.Exception.Message)" }
+Section "Carpenter (claude -> DeepSeek)"
+if (Has claude) { Ok "claude present (Carpenter + Architect engine)" }
+else { Bad "claude (Claude Code) missing — install from https://claude.com/claude-code" }
+$dsKey = $env:DEEPSEEK_API_KEY
+if (-not $dsKey -and (Test-Path "$HOME/.fcc/.env")) {
+  $m = Select-String -Path "$HOME/.fcc/.env" -Pattern '^DEEPSEEK_API_KEY=(.+)$' -ErrorAction SilentlyContinue
+  if ($m) { $dsKey = 'set (in ~/.fcc/.env)' }
 }
-if (Has fcc-claude) { Ok "fcc-claude present" } else { Warn "fcc-claude missing" }
-Warn "MANUAL: run 'fcc-server', open http://127.0.0.1:8082/admin, paste DEEPSEEK_API_KEY,"
-Warn "        set MODEL = deepseek/deepseek-v4-pro, Validate + Apply. (Get a key + small balance"
-Warn "        at platform.deepseek.com/api_keys.)"
+if ($dsKey) { Ok "DEEPSEEK_API_KEY found — Carpenter will route to DeepSeek (cheap)" }
+else { Warn "DEEPSEEK_API_KEY not set — Carpenter will build on Anthropic Claude (costlier). For cheap builds: set DEEPSEEK_API_KEY (key at platform.deepseek.com/api_keys)." }
+# Legacy: the fcc router stays supported via SHIP_CARPENTER_CMD=fcc-claude.
+if (Has fcc-claude) { Ok "fcc-claude also present (optional legacy router)" }
 
 # ---------------------------------------------------------------------------
 # 5. git
@@ -141,12 +146,12 @@ if ($nodeP.state -eq 'ok') {
   if ($maj -lt 22) { $nodeP = @{ state='broken'; detail="$(node --version) < required 22" } }
 }
 $probes = @(
-  @{ n='node>=22';               p=$nodeP }
-  @{ n='git';                    p=(Probe git) }
-  @{ n='graphify';               p=(Probe graphify) }
-  @{ n='fcc-claude (Carpenter)'; p=(Probe fcc-claude) }
-  @{ n='codex (Reviewer)';       p=(Probe codex) }
-  @{ n='ship (CLI on PATH)';     p=(Probe ship --help) }
+  @{ n='node>=22';                p=$nodeP }
+  @{ n='git';                     p=(Probe git) }
+  @{ n='claude (Carpenter+Arch)'; p=(Probe claude --version) }
+  @{ n='graphify';                p=(Probe graphify) }
+  @{ n='codex (Reviewer)';        p=(Probe codex) }
+  @{ n='ship (CLI on PATH)';      p=(Probe ship --help) }
 )
 $bad = 0
 foreach ($r in $probes) {
@@ -160,7 +165,8 @@ if ($bad -eq 0) { Ok "all engines functional" }
 else { Bad "$bad item(s) not functional — fix above. For live token-spending probes (codex -o, git effect): node calibrate.js" }
 
 Write-Host "`nNext:" -ForegroundColor White
-Write-Host "  1. Finish the two MANUAL items above (DeepSeek Admin UI; codex login)."
-Write-Host "  2. Verify the live engines:   node calibrate.js"
-Write-Host "  3. New project (fast path):   cd <project>; ship-init   (then edit SPEC.md; run 'ship' or /ship)"
-Write-Host "  4. 'ship' + 'ship-init' are global after the link above — no per-project file copy needed."
+Write-Host "  1. Run 'codex login' (the Reviewer)."
+Write-Host "  2. (Optional, for cheap builds) set DEEPSEEK_API_KEY — else the Carpenter uses Anthropic Claude."
+Write-Host "  3. Verify the live engines:   node calibrate.js"
+Write-Host "  4. New project:   cd <project>; ship-init   then  ship-app  (chat with the Architect) or  ship"
+Write-Host "  5. 'ship' / 'ship-app' / 'ship-init' are global after the link above — no per-project copy needed."
