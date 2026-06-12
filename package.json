@@ -6,7 +6,8 @@
     "ship": "./ship.js",
     "ship-init": "./ship-init.js",
     "ship-chat": "./ship-chat.js",
-    "ship-ui": "./ship-ui.js"
+    "ship-ui": "./ship-ui.js",
+    "ship-app": "./ship-app.js"
   },
   "scripts": {
     "init":     "node ship-init.js",

@@ -164,13 +164,20 @@ ship-init                 # adds CLAUDE.md guidance, .gitignore rules, a SPEC.md
 ship                      # or, inside Claude Code:  /ship
 ```
 
-Three ways to run the loop, same engine underneath:
+Four ways to run it, same loop underneath:
 
 | Command | What you get |
 |---------|--------------|
+| `ship-app` | **the one-window app** — chat with the **Architect** (Claude), who asks what it needs, writes `SPEC.md`, then on **Ship it** runs the loop with the three agents streaming live below. After `ship-init`, just double-click `ship-app.cmd`. |
 | `ship` | the full orchestrator log (the canonical, validated path) |
-| `ship-chat "build X"` | a friendly chat front-end: type a task, watch one live status line, get a plain-English summary |
+| `ship-chat "build X"` | terminal front-end: type a task verbatim, watch one live status line, get a plain-English summary |
 | `ship-ui "build X"` | a local web dashboard with three live columns (Worker / Master / Reviewer) streaming their reasoning |
+
+> **`ship-app` vs `ship-chat`:** `ship-chat` writes your text to `SPEC.md` *verbatim*.
+> `ship-app` puts a real **Architect** in front: it converses, sharpens the spec, and —
+> for UI/front-end work the DeepSeek Carpenter can't do well — **builds the UI itself**
+> before the loop runs ([ADR-0011](docs/adr/0011-architect-chat-app-and-ui-routing.md)).
+> Engine overridable via `SHIP_ARCHITECT_CMD` (default `claude`).
 
 On **clean pass** (exit 0): review the printed diff, then merge:
 ```powershell
@@ -200,8 +207,9 @@ at higher token cost. Copy `.env.example` → `.env` to set these persistently.
 
 ```
 ship.js            — orchestrator (Architect → Carpenter → Reviewer loop)
-ship-init.js       — bootstrap any project with the workflow
-ship-chat.js       — chat front-end (type a task, get a plain-English answer)
+ship-init.js       — bootstrap any project with the workflow (+ ship-app.cmd launcher)
+ship-app.js        — one-window app: chat with the Architect, then ship (ADR-0011)
+ship-chat.js       — terminal front-end (type a task, get a plain-English answer)
 ship-ui.js         — live web dashboard (three streaming agent columns)
 ship-watch.ps1     — desktop notifier that toasts on terminal states
 calibrate.js       — one-time live calibration to verify engine shapes
@@ -212,7 +220,7 @@ lib/parse.js       — shared defensive JSON parsing (shape-validated)
 docs/
   WORKFLOW.md      — full expert workflow guide
   CONTEXT.md       — canonical glossary of all roles/terms
-  adr/             — Architecture Decision Records (ADR-0001 → ADR-0010)
+  adr/             — Architecture Decision Records (ADR-0001 → ADR-0011)
 .claude/skills/ship/SKILL.md  — the /ship Claude Code skill
 .env.example       — optional, NON-SECRET tuning knobs
 ```
@@ -247,6 +255,7 @@ Full log in [`docs/adr/`](docs/adr/). Highlights:
 - **ADR-0008** — the Carpenter sub-swarm (Worker + Master foreman)
 - **ADR-0009** — why the public default Carpenter stays DeepSeek
 - **ADR-0010** — Worker effort (`xhigh`) + the gated `ultracode` workflow half
+- **ADR-0011** — the Architect chat-app + UI-from-handoff routing
 
 ---
 

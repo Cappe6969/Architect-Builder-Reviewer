@@ -95,6 +95,8 @@ graph.json
 graph.html
 GRAPH_REPORT.md
 graphify-out/
+# machine-specific launcher (absolute path) — created by ship-init, not shared
+ship-app.cmd
 # secrets live in their tools (fcc admin UI / codex login), never the repo
 .env
 .env.local`;
@@ -107,6 +109,21 @@ if (!fs.existsSync(GITIGNORE_PATH)) {
 } else {
   fs.appendFileSync(GITIGNORE_PATH, '\n' + GI_BLOCK + '\n');
   ok('ship artifacts appended to existing .gitignore');
+}
+
+// ---------------------------------------------------------------------------
+// ship-app.cmd — a double-click launcher (Windows) that opens the Architect chat
+// app IN THIS PROJECT. Built against the absolute path of the installed ship-app.js
+// so it works whether or not `ship-app` is globally linked.
+// ---------------------------------------------------------------------------
+const APP_JS = path.join(__dirname, 'ship-app.js');
+const CMD_PATH = path.join(TARGET, 'ship-app.cmd');
+if (process.platform === 'win32' && !fs.existsSync(CMD_PATH)) {
+  fs.writeFileSync(CMD_PATH,
+    '@echo off\r\n'
+    + 'cd /d "%~dp0"\r\n'
+    + `node "${APP_JS}" %*\r\n`);
+  ok('ship-app.cmd created (double-click to chat with the Architect)');
 }
 
 // ---------------------------------------------------------------------------
@@ -125,5 +142,5 @@ if (!fs.existsSync(SPEC_PATH)) {
 // ---------------------------------------------------------------------------
 console.log('');
 console.log('Project bootstrapped. Next steps:');
-console.log('  1. Edit SPEC.md with what you want built');
-console.log('  2. Run  ship  (or ask Claude Code — it will handle the whole loop)');
+console.log('  • Chat with the Architect:  double-click ship-app.cmd  (or run  ship-app)');
+console.log('  • Or go straight to a build: edit SPEC.md, then run  ship');

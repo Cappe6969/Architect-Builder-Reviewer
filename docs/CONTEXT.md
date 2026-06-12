@@ -10,7 +10,7 @@ The single artifact that carries the Architect's intent to the Carpenter. A file
 - A Spec is *instructions to build*, not a glossary and not an ADR.
 
 ## Architect
-The role that decides. Claude Code running real **Opus** (`claude`). Owns planning, design/taste, terminology, and the Spec. Also applies fixes after review. Never grades its own output.
+The role that decides. Claude Code running real **Opus** (`claude`). Owns planning, design/taste, terminology, and the Spec. Also applies fixes after review. Never grades its own output. Reachable as an **interactive multi-turn agent** through `ship-app` (a localhost chat) — it converses, then writes `SPEC.md`. By exception it also **builds**: UI / front-end-from-handoff work, which the Carpenter cannot do well, is built by the Architect directly before the loop runs (the Reviewer then audits those files against the Spec). See [ADR-0011](docs/adr/0011-architect-chat-app-and-ui-routing.md).
 
 ## Carpenter
 The role that builds. Claude Code running **DeepSeek V4** via the `free-claude-code` router (`fcc-claude`). Executes the Spec verbatim; makes **no** design decisions. Never sees secrets/IP (see workflow guardrails). Realized as a **sub-swarm** — a Master Carpenter supervising one or more Worker Carpenters — entirely behind the `runRole` seam, so the outer loop still sees a single Carpenter.
