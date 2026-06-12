@@ -80,13 +80,27 @@ const carpenterWorkflowArgs = CARPENTER_WORKFLOW ? ['--disallowedTools', 'EnterW
 // Injected ONLY on the default path (no SHIP_CARPENTER_CMD override) and only when a
 // key exists; otherwise the Carpenter runs as plain Anthropic Claude so the loop still
 // works (costlier). Legacy: SHIP_CARPENTER_CMD=fcc-claude still drives the old router.
-const carpenterEnv = (!process.env.SHIP_CARPENTER_CMD && process.env.DEEPSEEK_API_KEY)
+const carpenterToDeepseek = !process.env.SHIP_CARPENTER_CMD && Boolean(process.env.DEEPSEEK_API_KEY);
+// CRITICAL: when Claude Code is OAuth-logged-in (~/.claude/.credentials.json), `claude`
+// IGNORES ANTHROPIC_API_KEY and sends its rotating OAuth token — which DeepSeek 401s.
+// Pointing the Worker at an isolated, credential-free CLAUDE_CONFIG_DIR forces it to fall
+// back to the injected DeepSeek key. The Master keeps the user's real OAuth (no override).
+const CARPENTER_CFG_DIR = path.join(os.homedir(), '.ship-carpenter-deepseek');
+const carpenterEnv = carpenterToDeepseek
   ? {
       ANTHROPIC_BASE_URL:   process.env.SHIP_DEEPSEEK_BASE_URL || 'https://api.deepseek.com/anthropic',
       ANTHROPIC_API_KEY:    process.env.DEEPSEEK_API_KEY,
       ANTHROPIC_AUTH_TOKEN: process.env.DEEPSEEK_API_KEY,
+      CLAUDE_CONFIG_DIR:    CARPENTER_CFG_DIR,
     }
   : {};
+if (carpenterToDeepseek) { try { fs.mkdirSync(CARPENTER_CFG_DIR, { recursive: true }); } catch { /* claude creates it on first run */ } }
+// DeepSeek's endpoint maps model names: opus → deepseek-v4-pro (thinking, slow),
+// sonnet/haiku → deepseek-v4-flash (fast). Pin the bulk Worker to a fast model by
+// default; override with SHIP_CARPENTER_MODEL (e.g. 'opus' for v4-pro reasoning).
+const carpenterModelArgs = carpenterToDeepseek
+  ? ['--model', process.env.SHIP_CARPENTER_MODEL || 'sonnet']
+  : (process.env.SHIP_CARPENTER_MODEL ? ['--model', process.env.SHIP_CARPENTER_MODEL] : []);
 
 const CONFIG = {
   specPath:      path.join(ROOT, 'SPEC.md'),
@@ -110,7 +124,7 @@ const CONFIG = {
   engines: {
     // carpenter == the Worker Carpenter (ADR-0008): cheap bulk builder. Default
     // `claude` + DeepSeek endpoint (carpenterEnv); see ADR-0012.
-    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'claude', env: carpenterEnv, args: ['-p', '--output-format', 'json', ...carpenterEffortArgs, ...carpenterWorkflowArgs, '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
+    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'claude', env: carpenterEnv, args: ['-p', '--output-format', 'json', ...carpenterModelArgs, ...carpenterEffortArgs, ...carpenterWorkflowArgs, '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
     // master == the Master Carpenter (ADR-0008): Claude foreman. Same headless
     // claude flags as a Worker, but it inspects (read-only judgment) instead of
     // building. Claude emits a `usage` envelope, so its calls un-blind the budget.

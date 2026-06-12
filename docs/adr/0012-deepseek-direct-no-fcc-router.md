@@ -58,6 +58,19 @@ cheap DeepSeek builds (claude-opus → deepseek-v4-pro) with **zero third-party 
 - README/`setup.ps1` move the fcc router + `:8082` admin UI from **required** to an
   **optional / legacy** section. The "have Claude Code + a DeepSeek key" path is now the
   documented default.
-- Unverified live: that a real `ship` run on `claude`→DeepSeek produces a clean build on
-  this repo's loop. The endpoint and model mapping are confirmed by DeepSeek's docs; an
-  end-to-end run is the remaining check.
+- **The OAuth-precedence trap (found during verification).** When Claude Code is
+  OAuth-logged-in (`~/.claude/.credentials.json` present — the normal subscription case),
+  `claude` **ignores** `ANTHROPIC_API_KEY` and sends its rotating OAuth token to whatever
+  `ANTHROPIC_BASE_URL` points at — which DeepSeek 401s (after ~187s of client-side
+  retry/backoff, looking like a hang). The env-var redirect alone is therefore **not
+  enough** on a logged-in machine. Fix: the Worker's spawn also sets
+  `CLAUDE_CONFIG_DIR=~/.ship-carpenter-deepseek` — an isolated, credential-free config dir
+  — so `claude` falls back to the injected DeepSeek key. Verified: with the isolated dir
+  the same call returns `OK` in ~6s (vs the 187s 401). The Master keeps the real OAuth
+  (no override), so only the bulk Worker routes to DeepSeek.
+- **Model pinning.** DeepSeek maps `opus → deepseek-v4-pro` (a slow thinking model) and
+  `sonnet/haiku → deepseek-v4-flash` (fast). The Worker pins `--model sonnet` by default
+  (fast flash builds); override with `SHIP_CARPENTER_MODEL`.
+- This is what free-claude-code's proxy did transparently (network-level interception +
+  server-side DeepSeek auth); ADR-0012 reproduces the effect with an isolated config dir
+  instead of a router to install.
