@@ -259,14 +259,18 @@ Full log in [`docs/adr/`](docs/adr/). Highlights:
 | `SHIP_MASTER_CMD` | `claude` | Master Carpenter (foreman) engine |
 | `SHIP_REVIEWER_CMD` | `codex` | Reviewer engine |
 | `SHIP_CARPENTER_EFFORT` | `xhigh` | Worker effort tier: `low\|medium\|high\|xhigh\|max`; `""` disables ([ADR-0010](docs/adr/0010-carpenter-effort-and-workflow.md)) |
-| `SHIP_CARPENTER_WORKFLOW` | _(unset)_ | `1` opts the Worker into dynamic-workflow orchestration (the "workflow" half of `ultracode`) — **may alter the JSON result shape** |
+| `SHIP_CARPENTER_WORKFLOW` | _(unset)_ | `1` opts the Worker into dynamic-workflow orchestration (the "workflow" half of `ultracode`) — guarded; see below |
 
 > **About `ultracode`:** Claude Code's `ultracode` mode is *xhigh effort + dynamic-workflow
 > orchestration* — it isn't a single headless flag (`--effort` only accepts
 > `low/medium/high/xhigh/max`). The Worker Carpenter runs at **`xhigh`** by default to
-> capture the effort half safely; the orchestration half is opt-in via
-> `SHIP_CARPENTER_WORKFLOW=1` because dynamic sub-agents can break the loop's
-> single-JSON result contract. Master and Reviewer are unaffected.
+> capture the effort half. The orchestration half is opt-in via
+> `SHIP_CARPENTER_WORKFLOW=1` and **safe to enable**: the loop blocks worktree isolation
+> (`--disallowedTools EnterWorktree`) so workflow sub-agents build in the tree the
+> orchestrator commits, and if one ever isolates anyway the run **halts loudly with the
+> worktree path** instead of silently losing the build. Master and Reviewer are
+> unaffected. (What's still unverified: whether a real workflow measurably improves a
+> multi-file build — that needs a live run.)
 
 Timeouts (`carpenterMs`, `reviewerMs`) and `maxRounds` live in `CONFIG` near the top
 of `ship.js`.

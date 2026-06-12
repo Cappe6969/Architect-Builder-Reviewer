@@ -17,17 +17,28 @@ halves with very different risk:
 - **Effort tier (safe).** `--effort xhigh` is a real, valid flag. Worst case a backend
   that doesn't support extended effort ignores it — the single-JSON result envelope
   is unchanged either way.
-- **Dynamic-workflow orchestration (risky).** Only reachable via the prompt **keyword
-  trigger**, which asks the harness to spawn Workflow *sub-agents*. That can change the
-  process's output shape, and the loop hard-depends on each Worker call returning one
-  `{status, changed_files}` JSON object (ADR-0002 shape guard). A broken envelope →
-  synthetic High → wasted rounds → escalation: the *opposite* of "always works."
+- **Dynamic-workflow orchestration (the real risk is git, not JSON).** Reachable via
+  the prompt **keyword trigger**, which lets the harness plan, spawn sub-agents, and
+  synthesize. The synthesized final result almost certainly still resolves to one
+  `{status, changed_files}` envelope (the sub-agents are internal to that one `-p`
+  invocation), so the JSON contract is *not* the main hazard. The real collision is
+  with the orchestrator's **git invariant**: the Worker edits the shared checkout and
+  the orchestrator commits from `ROOT`; but a workflow sub-agent can call
+  `EnterWorktree` and build in an **isolated worktree**. Then `carpenterCommit` (which
+  stages `ROOT`) sees nothing → a **false "no changes" no-op** that silently discards a
+  real build. Worktree isolation is a feature of *background* sessions, not foreground
+  `-p` runs, so it is unlikely by default — but possible, and silent if unguarded.
 
-**Decision:** force only the safe half by default. The Worker Carpenter gets
-`--effort xhigh` via `SHIP_CARPENTER_EFFORT` (default `xhigh`; set to `""` to disable,
-or `max` for the highest tier). The workflow-orchestration half is **opt-in** behind
-`SHIP_CARPENTER_WORKFLOW=1`, which injects the `ultracode` trigger keyword into the
-Worker's build prompt — documented as "may alter the result envelope."
+**Decision:** force the safe half by default; make the workflow half **safe to enable**,
+not merely opt-in. The Worker Carpenter gets `--effort xhigh` via `SHIP_CARPENTER_EFFORT`
+(default `xhigh`; `""` disables, `max` for the highest tier). `SHIP_CARPENTER_WORKFLOW=1`
+turns on the dynamic-workflow half with a **two-layer guard**:
+1. **Prevent isolation.** The carpenter args gain `--disallowedTools EnterWorktree
+   ExitWorktree`, so sub-agents *cannot* isolate — every workflow edit lands in the
+   shared checkout the orchestrator commits from.
+2. **Backstop the leak.** If a side worktree ever appears on a "no changes" round, the
+   loop **fails loud** with its path (`sideWorktrees()`), never recording a false no-op
+   that loses the build.
 
 Applies to the **Worker Carpenter only** ("only the DeepSeek part"): the Master
 (`claude`) foreman and the Codex Reviewer are untouched. `--effort` is added to the
@@ -49,8 +60,13 @@ carpenter engine args, so it also benefits the `SHIP_CARPENTER_CMD=claude` overr
 
 - **`--effort ultracode`** — what the request literally asked for; the CLI rejects it
   as an unknown value and silently uses the default. A no-op masquerading as a feature.
-- **Workflow keyword on by default** — gives the full ultracode mode, but lets dynamic
-  sub-agents break the JSON envelope unpredictably. Kept as an explicit opt-in instead.
+- **Workflow keyword on by default** — gives the full ultracode mode, but a sub-agent
+  could isolate into a worktree the orchestrator can't commit. Kept opt-in, and only
+  *after* adding the isolation block + backstop so enabling it can't silently lose work.
+- **Auto-absorb an isolated worktree** — merge a leaked worktree's commits back into
+  `ROOT` automatically. Rejected for now: too many ambiguous cases (detached HEAD,
+  uncommitted-only edits, multiple worktrees) to do safely. Fail-loud-with-path is the
+  honest backstop; auto-absorption is possible future work.
 - **Apply to Master/Reviewer too** — out of scope; the request was the DeepSeek Worker.
 
 ## Consequences
@@ -59,6 +75,12 @@ carpenter engine args, so it also benefits the `SHIP_CARPENTER_CMD=claude` overr
   is currently broken on the author's machine (missing `uv` cpython — see
   engine-environment notes). The flag is a valid no-op at worst, so this is low-risk,
   but whether DeepSeek *honors* xhigh effort is unconfirmed.
-- A future reader wondering why "ultracode" became `--effort xhigh` plus an opt-in
+- A future reader wondering why "ultracode" became `--effort xhigh` plus a guarded
   keyword has the answer here: the mode isn't a single headless flag, and its second
-  half fights the result contract.
+  half collides with the orchestrator's commit-from-`ROOT` invariant unless isolation
+  is blocked and leaks are caught.
+- The workflow half is **safe to turn on**: with `SHIP_CARPENTER_WORKFLOW=1` a build
+  either lands in `ROOT` (committed normally) or halts loudly pointing at the worktree
+  — it can no longer silently no-op. What's still unverified is whether a real workflow
+  *measurably helps* a multi-file Spec; confirming that needs a live run (blocked on the
+  broken `fcc` engine, or testable via the `SHIP_CARPENTER_CMD=claude` path).

@@ -62,6 +62,13 @@ const TRACE_STREAM = !!process.env.SHIP_TRACE; // opt-in (set by ship-ui): strea
 const CARPENTER_EFFORT   = process.env.SHIP_CARPENTER_EFFORT ?? 'xhigh';
 const CARPENTER_WORKFLOW = process.env.SHIP_CARPENTER_WORKFLOW === '1';
 const carpenterEffortArgs = CARPENTER_EFFORT ? ['--effort', CARPENTER_EFFORT] : [];
+// Workflow safety (ADR-0010): when the dynamic-workflow half is enabled, BLOCK the
+// worktree-isolation tools so sub-agents must build in the shared checkout (the main
+// tree carpenterCommit stages) instead of an isolated worktree the orchestrator can't
+// see/commit. A foreground `-p` run only isolates if a sub-agent calls EnterWorktree;
+// disallowing it keeps every workflow edit in-tree. A runtime backstop (sideWorktrees)
+// catches any leak. Adds the keyword via SHIP_CARPENTER_WORKFLOW handled in buildPrompt.
+const carpenterWorkflowArgs = CARPENTER_WORKFLOW ? ['--disallowedTools', 'EnterWorktree', 'ExitWorktree'] : [];
 
 const CONFIG = {
   specPath:      path.join(ROOT, 'SPEC.md'),
@@ -84,7 +91,7 @@ const CONFIG = {
   // DeepSeek, so it shares the exact same args as real `claude`.
   engines: {
     // carpenter == the Worker Carpenter (ADR-0008): cheap bulk builder.
-    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'fcc-claude', args: ['-p', '--output-format', 'json', ...carpenterEffortArgs, '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
+    carpenter: { cmd: process.env.SHIP_CARPENTER_CMD || 'fcc-claude', args: ['-p', '--output-format', 'json', ...carpenterEffortArgs, ...carpenterWorkflowArgs, '--dangerously-skip-permissions', '--mcp-config', path.join(__dirname, 'no-mcp.json'), '--strict-mcp-config'] },
     // master == the Master Carpenter (ADR-0008): Claude foreman. Same headless
     // claude flags as a Worker, but it inspects (read-only judgment) instead of
     // building. Claude emits a `usage` envelope, so its calls un-blind the budget.
@@ -1011,6 +1018,21 @@ async function runCarpenterSwarm(payload) {
   return { masterNotes };
 }
 
+// sideWorktrees — git worktrees OTHER than the main one (ROOT). Used as the ADR-0010
+// workflow backstop: a Dynamic Workflow sub-agent that called EnterWorktree builds in
+// an isolated checkout the orchestrator never stages. Returns absolute paths, or [].
+function sideWorktrees() {
+  try {
+    const out = spawnSyncCheck('git', ['worktree', 'list', '--porcelain']);
+    const norm = (p) => path.resolve(p.trim()).replace(/[\\/]+$/, '').toLowerCase();
+    const root = norm(ROOT);
+    return out.split('\n')
+      .filter((l) => l.startsWith('worktree '))
+      .map((l) => l.slice('worktree '.length).trim())
+      .filter((p) => norm(p) !== root);
+  } catch { return []; }
+}
+
 // ---------------------------------------------------------------------------
 // Main loop — Retry Loop spins Carpenter <-> Reviewer (ADR-0002 topology)
 // ---------------------------------------------------------------------------
@@ -1049,6 +1071,19 @@ async function main() {
       trace('worker', 'result', `Committed ${commit.files.length} file(s):\n` + commit.files.map((f) => '  • ' + f).join('\n'));
     }
     if (!commit.changed) {
+      // Workflow safety backstop (ADR-0010): a "no changes" round with a stray git
+      // worktree means a Dynamic Workflow sub-agent isolated and built OUTSIDE the
+      // main tree. Fail LOUD with its path rather than recording a false no-op that
+      // silently discards a real build. (Prevention: --disallowedTools EnterWorktree.)
+      const stray = sideWorktrees();
+      if (stray.length) {
+        fail('Carpenter produced no changes in the main tree, but built in an ISOLATED '
+          + 'git worktree — its work is here, not committed:\n'
+          + stray.map((p) => '    ' + p).join('\n')
+          + '\n  Cause: a Dynamic Workflow sub-agent isolated (ultracode/workflow mode).\n'
+          + '  Recover: inspect + merge that worktree, or re-run with SHIP_CARPENTER_WORKFLOW unset.\n'
+          + '  (Refusing to record a false no-op and silently lose the build.)');
+      }
       // No-op Carpenter must NOT reach a false clean pass. Skip the Reviewer (save
       // tokens), record a synthetic High, and let the breaker handle it.
       log(`round ${attempt}: Carpenter produced NO changes — treating as High no-op`);
