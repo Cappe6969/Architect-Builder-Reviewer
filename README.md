@@ -259,6 +259,7 @@ Full log in [`docs/adr/`](docs/adr/). Highlights:
 | `SHIP_TOKEN_BUDGET` | `2000000` | token cap across all rounds |
 | `DEEPSEEK_API_KEY` | _(unset)_ | routes the default `claude` Carpenter to DeepSeek (cheap, no router); unset = build on Anthropic Claude ([ADR-0012](docs/adr/0012-deepseek-direct-no-fcc-router.md)) |
 | `SHIP_CARPENTER_CMD` | `claude` | Worker Carpenter engine (`fcc-claude` for the legacy router) |
+| `SHIP_CARPENTER_MODEL` | `opus` | model the DeepSeek-routed Worker requests: `opus` → deepseek-v4-pro (quality), `haiku` → deepseek-v4-flash (fast) |
 | `SHIP_DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | DeepSeek Anthropic endpoint the Carpenter points at |
 | `SHIP_MASTER_CMD` | `claude` | Master Carpenter (foreman) engine |
 | `SHIP_REVIEWER_CMD` | `codex` | Reviewer engine |

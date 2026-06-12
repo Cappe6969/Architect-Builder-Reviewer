@@ -68,9 +68,10 @@ cheap DeepSeek builds (claude-opus → deepseek-v4-pro) with **zero third-party 
   — so `claude` falls back to the injected DeepSeek key. Verified: with the isolated dir
   the same call returns `OK` in ~6s (vs the 187s 401). The Master keeps the real OAuth
   (no override), so only the bulk Worker routes to DeepSeek.
-- **Model pinning.** DeepSeek maps `opus → deepseek-v4-pro` (a slow thinking model) and
-  `sonnet/haiku → deepseek-v4-flash` (fast). The Worker pins `--model sonnet` by default
-  (fast flash builds); override with `SHIP_CARPENTER_MODEL`.
+- **Model pinning.** DeepSeek maps `opus → deepseek-v4-pro` (the stronger model) and
+  only `haiku → deepseek-v4-flash` (fast/cheap). The Worker pins `--model opus` by default
+  → **v4-pro for build quality** (a thinking model: slower first token, better code);
+  override with `SHIP_CARPENTER_MODEL=haiku` for fast flash builds.
 - This is what free-claude-code's proxy did transparently (network-level interception +
   server-side DeepSeek auth); ADR-0012 reproduces the effect with an isolated config dir
   instead of a router to install.

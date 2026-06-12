@@ -95,11 +95,12 @@ const carpenterEnv = carpenterToDeepseek
     }
   : {};
 if (carpenterToDeepseek) { try { fs.mkdirSync(CARPENTER_CFG_DIR, { recursive: true }); } catch { /* claude creates it on first run */ } }
-// DeepSeek's endpoint maps model names: opus → deepseek-v4-pro (thinking, slow),
-// sonnet/haiku → deepseek-v4-flash (fast). Pin the bulk Worker to a fast model by
-// default; override with SHIP_CARPENTER_MODEL (e.g. 'opus' for v4-pro reasoning).
+// DeepSeek's endpoint maps model names: opus → deepseek-v4-pro (the stronger build
+// model), and only haiku → deepseek-v4-flash (fast/cheap). Default the Worker to
+// opus → v4-pro for build quality; override with SHIP_CARPENTER_MODEL (e.g. 'haiku'
+// for the fast v4-flash). v4-pro is a thinking model — slower first token, better code.
 const carpenterModelArgs = carpenterToDeepseek
-  ? ['--model', process.env.SHIP_CARPENTER_MODEL || 'sonnet']
+  ? ['--model', process.env.SHIP_CARPENTER_MODEL || 'opus']
   : (process.env.SHIP_CARPENTER_MODEL ? ['--model', process.env.SHIP_CARPENTER_MODEL] : []);
 
 const CONFIG = {
